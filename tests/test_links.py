@@ -202,6 +202,42 @@ group.links.clear()
 check("a bone outside the group's chains is not linked",
       link_bones(obj, ["panel0_1", "hips"]) == {"CANCELLED"} and len(group.links) == 0)
 
+
+def can_link(obj, names, op="link_bones"):
+    """Is the button live for this selection (its poll)?"""
+    bpy.context.view_layer.objects.active = obj
+    bpy.ops.object.mode_set(mode="POSE")
+    for pb in obj.pose.bones:
+        pb.select = pb.name in names
+    live_button = getattr(bpy.ops.waifu_physics, op).poll()
+    bpy.ops.object.mode_set(mode="OBJECT")
+    return live_button
+
+
+check("Link Selected Bones is greyed out with one bone, or none",
+      not can_link(obj, ["panel0_2"]) and not can_link(obj, []))
+check("... for two bones of one chain: the chain already keeps them apart",
+      not can_link(obj, ["panel0_1", "panel0_3"]) and not can_link(obj, ["panel0_1", "panel0_2"]))
+check("... for roots, which follow the animation", not can_link(obj, ["panel0_0", "panel1_0"])
+      and not can_link(obj, ["panel0_0", "panel1_2"]))
+check("... and live for two bones of different chains, at any depths",
+      can_link(obj, ["panel0_1", "panel1_1"]) and can_link(obj, ["panel0_1", "panel1_3"]))
+check("two bones of different chains at different depths make one diagonal link",
+      link_bones(obj, ["panel0_1", "panel1_3"]) == {"FINISHED"}
+      and [{l.bone_a, l.bone_b} for l in group.links] == [{"panel0_1", "panel1_3"}])
+check("... and once linked, the button greys out", not can_link(obj, ["panel0_1", "panel1_3"]))
+group.links.clear()
+check("whole chains selected link bone by bone at each depth, never along a chain",
+      link_bones(obj, [f"panel{k}_{i}" for k in (0, 1) for i in range(4)]) == {"FINISHED"}
+      and sorted(tuple(sorted((int(l.bone_a[-1]), int(l.bone_b[-1])))) for l in group.links) == [(1, 1), (2, 2), (3, 3)],
+      [(l.bone_a, l.bone_b) for l in group.links])
+group.links.clear()
+group.excluded.add().name = "panel1_2"
+check("a bone the group excludes (or one under it) is not linked", not can_link(obj, ["panel0_3", "panel1_3"]))
+group.excluded.clear()
+check("Link Whole Chains is greyed out until bones of two chains are selected",
+      not can_link(obj, ["panel0_1", "panel0_2"], "link_chains") and can_link(obj, ["panel0_1", "panel1_2"], "link_chains"))
+
 addon.unregister()
 check("... and stops when unregistered", draw._handle is None)
 finish()

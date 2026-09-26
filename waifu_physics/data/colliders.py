@@ -309,6 +309,92 @@ def pick(scene, obj):
     view_layer.objects.active = obj
 
 
+def _posing(view_layer):
+    """The armature in Pose Mode whose bones stand for its colliders, or None."""
+    active = view_layer.objects.active
+    return active if active is not None and active.type == "ARMATURE" and active.mode == "POSE" else None
+
+
+def _bone_of(armature, obj):
+    """The pose bone a collider hangs from on this armature, or None."""
+    if obj.parent != armature or obj.parent_type != "BONE":
+        return None
+    return armature.pose.bones.get(obj.parent_bone)
+
+
+def chosen(scene, stored=None):
+    """Every collider the viewport has selected, the picked one (picked) among them: selected collider objects;
+    in Pose Mode, the colliders on the armature's selected bones."""
+    view_layer = _view_layer(scene)
+    armature = _posing(view_layer)
+    if armature is not None:
+        found = [obj for obj in all_of(armature) if (bone := _bone_of(armature, obj)) is not None and bone.select]
+    else:
+        found = [obj for obj in view_layer.objects.selected if is_collider(obj)]
+    current = picked(scene, stored)
+    if current is not None and current not in found:
+        found.append(current)
+    return found
+
+
+def select(scene, objs, state=True, activate=None):
+    """Add colliders to the viewport's selection (state False: take them out), leaving the rest of it: the
+    objects, or in Pose Mode their bones. activate: the collider to make picked (Pose Mode: its bone active)."""
+    view_layer = _view_layer(scene)
+    armature = _posing(view_layer)
+    if armature is not None:
+        for obj in objs:
+            bone = _bone_of(armature, obj)
+            if bone is not None:
+                bone.select = state
+        bone = _bone_of(armature, activate) if activate is not None else None
+        if bone is not None:
+            armature.data.bones.active = armature.data.bones[bone.name]
+        return
+    active = view_layer.objects.active
+    if active is not None and active.mode != "OBJECT":
+        return                                            # editing something: its selection is left alone
+    for obj in objs:
+        if obj.name in view_layer.objects:
+            if state:
+                obj.hide_set(False)
+            obj.select_set(state)
+    if activate is not None and activate.name in view_layer.objects:
+        view_layer.objects.active = activate
+
+
+def unpick(scene, obj):
+    """Take the picked collider out of the selection: the pick moves to another selected collider, if any."""
+    view_layer = _view_layer(scene)
+    select(scene, [obj], False)
+    rest = [other for other in chosen(scene) if other != obj]
+    armature = _posing(view_layer)
+    if armature is not None:
+        bone = _bone_of(armature, rest[-1]) if rest else None
+        armature.data.bones.active = armature.data.bones[bone.name] if bone is not None else None
+    elif view_layer.objects.active == obj:
+        view_layer.objects.active = rest[-1] if rest else None
+    return rest[-1] if rest else None
+
+
+def listed_armatures(context):
+    """The armatures the Colliders page lists, in the scene's order: every one with colliders, and the active
+    one, so it can be given its first. What is listed follows what exists, not what is selected."""
+    active = armature_of(context)
+    return [obj for obj in context.scene.objects
+            if obj.type == "ARMATURE" and (obj == active or all_of(obj))]
+
+
+def listed(context):
+    """The colliders the Colliders page shows, top to bottom: those in open armature folders, then the scene's.
+    Shift-click selects a run of them."""
+    found = []
+    for armature in listed_armatures(context):
+        if armature.waifu_physics.colliders_expanded:
+            found += all_of(armature)
+    return found + scene_colliders(context.scene, enabled_only=False)
+
+
 def modifier(obj):
     return obj.modifiers.get(MODIFIER)
 
@@ -396,12 +482,13 @@ def colliders_of(armature):
     return [obj for obj in armature.children if is_collider(obj) and obj.waifu_physics_collider.enabled]
 
 
-def shape_of(obj, armature, cm):
-    """The collider as a solver Shape in the armature's space, centimetres."""
+def shape_of(obj, armature, cm, matrix=None):
+    """The collider as a solver Shape in the armature's space, centimetres. matrix: the collider's matrix in
+    the armature's space, when the caller knows it better than Blender's last evaluation (read ahead)."""
     found = values(obj)
     if found is None:
         return None
-    m = armature.matrix_world.inverted_safe() @ obj.matrix_world
+    m = Matrix(matrix.tolist()) if matrix is not None else armature.matrix_world.inverted_safe() @ obj.matrix_world
     location, rotation, scale = m.decompose()
     sx, sy, sz = (abs(v) for v in scale)
     kind = KINDS.get(found["Shape"], SPHERE_OUTER)

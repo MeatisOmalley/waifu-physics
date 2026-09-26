@@ -8,12 +8,13 @@ from _harness import check, finish, fresh_import
 
 import bpy
 import numpy as np
-from mathutils import Vector
+from mathutils import Quaternion, Vector
 
 addon = fresh_import()
 addon.register()
 live = sys.modules["waifu_physics.runtime.live"]
 keys = sys.modules["waifu_physics.runtime.keys"]
+io = sys.modules["waifu_physics.runtime.io"]
 scene = bpy.context.scene
 
 
@@ -60,6 +61,10 @@ def chain_curves(rig):
     return [c for c in bag.fcurves if c.data_path.startswith('pose.bones["h')]
 
 
+check("Fast Evaluation is off by default: live playback reads its input on time",
+      not scene.waifu_physics.fast_evaluation)
+scene.waifu_physics.fast_evaluation = True
+
 # --- taken-over keys
 rig = build()
 curves = chain_curves(rig)
@@ -82,6 +87,206 @@ turn = rig.pose.bones["h1"].rotation_euler.z
 scene.frame_set(35)
 check("a jump is not solved ahead (it resets from a freshly evaluated pose)", rt.stepped_ahead is None)
 check("the keyed bone still turns toward its keys while simulating", turn > 0.1, turn)
+
+# --- Fast Evaluation off: solved after Blender evaluates the frame, on time. With the scene at the simulation's
+# rate (one step a frame, no subframes to sample), live playback is then the cache.
+def tips(frames, fast=None):
+    """The chain's tip, in world space, each frame: live playback, or the cache (fast None)."""
+    settings = scene.waifu_physics
+    settings.simulate = False
+    scene.frame_set(1)
+    if fast is None:
+        bpy.ops.waifu_physics.cache_toggle()
+    else:
+        settings.fast_evaluation = fast
+        settings.simulate = True
+    found, ahead = [], []
+    for f in frames:
+        scene.frame_set(f)
+        bpy.context.view_layer.update()             # the redraw evaluates a write made after the frame
+        found.append(np.array(rig.matrix_world @ rig.pose.bones["h3"].tail))
+        ahead.append(live.runtime(scene).stepped_ahead == f)
+    if fast is None:
+        bpy.ops.waifu_physics.cache_toggle()
+    settings.simulate = False
+    settings.fast_evaluation = True
+    return np.array(found), ahead
+
+
+scene.render.fps = 60
+frames = range(1, 41)
+cached, _ = tips(frames)
+slow, ahead_slow = tips(frames, fast=False)
+fast, ahead_fast = tips(frames, fast=True)
+check("Fast Evaluation off never solves ahead", not any(ahead_slow) and all(ahead_fast[1:]))
+check("... and at the simulation's rate, live playback matches the cache",
+      float(np.abs(slow - cached).max()) < 1e-6, float(np.abs(slow - cached).max()))
+check("... and Fast Evaluation too, here: only keys move the rig, so it reads this frame's input (not a frame late)",
+      float(np.abs(fast - cached).max()) < 1e-5, float(np.abs(fast - cached).max()))
+scene.render.fps = 24
+rig = build()
+curves = chain_curves(rig)
+scene.frame_set(1)
+scene.waifu_physics.simulate = True
+
+# --- Steps per Second changed while playing: the clock follows, the chain swings on (no rebuild, no snap to the
+# pose), and it keeps its velocity through the change
+def swing(frames, change=None):
+    """The tip each frame, and the runtime, playing live with Steps per Second changed at a frame: (frame, rate)."""
+    settings = scene.waifu_physics
+    settings.simulate = False
+    settings.target_framerate = 60
+    scene.frame_set(1)
+    settings.simulate = True
+    found = []
+    for f in frames:
+        if change is not None and f == change[0]:
+            before = live.runtime(scene)
+            settings.target_framerate = change[1]
+        scene.frame_set(f)
+        bpy.context.view_layer.update()
+        found.append(np.array(rig.matrix_world @ rig.pose.bones["h3"].tail))
+    return np.array(found), (before if change else None)
+
+
+frames = range(1, 31)
+steady, _ = swing(frames)
+changed, before = swing(frames, (15, 61))
+after = live.runtime(scene)
+check("changing Steps per Second while playing keeps the running simulation (no rebuild)",
+      after is before and after.system.target_framerate == 61)
+frame_motion = float(np.linalg.norm(steady[14] - steady[13]))
+check("... so the chain swings on: the same up to the change, and at it within half a frame's motion (a step landing "
+      "either side of the frame; the old rebuild snapped it back to the pose)",
+      float(np.abs(changed[:14] - steady[:14]).max()) == 0.0
+      and float(np.linalg.norm(changed[14] - steady[14])) < 0.5 * frame_motion,
+      (float(np.linalg.norm(changed[14] - steady[14])), frame_motion))
+doubled, _ = swing(frames, (15, 120))
+jumps = np.linalg.norm(np.diff(doubled, axis=0), axis=1)
+check("... and doubling it keeps the chain's velocity: no jump at the change",
+      jumps[13] < 2.0 * max(jumps[11], jumps[12], 1e-4), (jumps[11], jumps[12], jumps[13]))
+scene.waifu_physics.simulate = False
+scene.waifu_physics.target_framerate = 60
+scene.frame_set(1)
+scene.waifu_physics.simulate = True
+
+# --- Fast Evaluation reads this frame's input where keys alone move it: a keyframed parent swinging the chain,
+# a keyframed armature object, and a collider on a keyframed bone the chain hits. Then it is exact.
+colliders = sys.modules["waifu_physics.data.colliders"]
+
+
+def swinger(constrain=False):
+    scene.waifu_physics.simulate = False
+    for obj in list(bpy.data.objects):
+        bpy.data.objects.remove(obj)
+    for action in list(bpy.data.actions):
+        bpy.data.actions.remove(action)
+    data = bpy.data.armatures.new("swinger")
+    obj = bpy.data.objects.new("swinger", data)
+    scene.collection.objects.link(obj)
+    bpy.context.view_layer.objects.active = obj
+    bpy.ops.object.mode_set(mode="EDIT")
+    base = data.edit_bones.new("base"); base.head, base.tail = (0, 0, 0), (0, 0, 1.0)
+    arm = data.edit_bones.new("arm"); arm.head, arm.tail = (0, 0, 0.5), (0.6, 0, 0.5); arm.parent = base
+    parent, at = base, Vector((0, 0, 1.0))
+    for i in range(3):
+        bone = data.edit_bones.new(f"s{i}"); bone.head, bone.tail = at, at + Vector((0, 0.05, 0.5)); bone.parent = parent
+        parent, at = bone, bone.tail.copy()
+    target = data.edit_bones.new("target"); target.head, target.tail = (1, 1, 0), (1, 1, 0.2)
+    bpy.ops.object.mode_set(mode="OBJECT")
+    base_bone, arm_bone = obj.pose.bones["base"], obj.pose.bones["arm"]
+    for f, turn, lift, x in ((1, 0.0, 0.0, 0.0), (10, 1.6, 0.8, 0.5), (20, -1.4, -0.6, -0.3), (30, 0.4, 1.2, 0.2), (40, 0.0, 0.0, 0.0)):
+        base_bone.rotation_mode = "XYZ"
+        base_bone.rotation_euler = (turn, 0.0, 0.3 * turn)
+        base_bone.keyframe_insert("rotation_euler", frame=f)
+        arm_bone.rotation_quaternion = Quaternion((0, 1, 0), lift)
+        arm_bone.keyframe_insert("rotation_quaternion", frame=f)
+        obj.location.x = x
+        obj.keyframe_insert("location", index=0, frame=f)
+    if constrain:
+        c = base_bone.constraints.new("DAMPED_TRACK")
+        c.target, c.subtarget = obj, "target"
+    group = obj.waifu_physics.groups.add()
+    group.roots.add().name = "s0"
+    group.radius = 0.05
+    collider = colliders.add(obj, "arm", "Sphere")
+    colliders.set_value(collider, "Radius", 0.8)              # overlaps the chain's lower bones as the arm swings
+    scene.frame_start, scene.frame_end = 1, 40
+    return obj
+
+
+def played(obj, fast=None):
+    """The chain's tips each frame in world space: live playback (fast on or off), or the cache (None)."""
+    settings = scene.waifu_physics
+    settings.simulate = False
+    scene.frame_set(1)
+    if fast is None:
+        bpy.ops.waifu_physics.cache_toggle()
+    else:
+        settings.fast_evaluation = fast
+        settings.simulate = True
+    tips, ahead = [], []
+    for f in range(1, 41):
+        scene.frame_set(f)
+        bpy.context.view_layer.update()
+        tips.append([np.array(obj.matrix_world @ obj.pose.bones[f"s{i}"].tail) for i in range(3)])
+        ahead.append(live.runtime(scene).stepped_ahead == f)
+    rt = live.runtime(scene)
+    if fast is None:
+        bpy.ops.waifu_physics.cache_toggle()
+    settings.simulate = False
+    return np.array(tips), ahead, rt
+
+
+scene.render.fps = 60
+obj = swinger()
+slow, _, _ = played(obj, fast=False)
+fast, ahead, rt = played(obj, fast=True)
+cached, _, _ = played(obj)
+rig = rt.rigs[0]
+check("a keyframed parent, collider bone and armature are read for this frame, not a frame late",
+      {rig.names[i] for i in rig.input_keys.bones} == {"base", "arm"} and rig.input_keys.object_ok)
+check("... so Fast Evaluation, solving before every frame, plays as the slow path and the cache do",
+      all(ahead[1:]) and float(np.abs(fast - slow).max()) < 1e-4 and float(np.abs(fast - cached).max()) < 1e-4,
+      (float(np.abs(fast - slow).max()), float(np.abs(fast - cached).max())))
+free = swinger()
+for collider in colliders.all_of(free):
+    collider.waifu_physics_collider.enabled = False
+check("... with the chain really hitting the collider on the swinging bone",
+      float(np.abs(slow - played(free, fast=False)[0]).max()) > 0.05, float(np.abs(slow - played(free, fast=False)[0]).max()))
+obj = swinger(constrain=True)
+fast, ahead, rt = played(obj, fast=True)
+slow, _, _ = played(obj, fast=False)
+rig = rt.rigs[0]
+check("a constrained parent is left to Blender's last evaluation (and so is what hangs below it)",
+      {rig.names[i] for i in rig.input_keys.bones} == set() and all(ahead[1:]),
+      [rig.names[i] for i in rig.input_keys.bones])
+ik = obj.pose.bones["s2"].constraints.new("IK")
+ik.target, ik.subtarget, ik.chain_count = obj, "target", 0
+for c in list(obj.pose.bones["base"].constraints):
+    obj.pose.bones["base"].constraints.remove(c)
+rig = io.Rig(obj)
+rig.set_chain([rig.index["s1"]])
+rig.prepare_input([rig.index["arm"]])
+check("an IK constraint that reaches up the chain keeps the bones it reaches out",
+      {rig.names[i] for i in rig.input_keys.bones} == set(), [rig.names[i] for i in rig.input_keys.bones])
+obj.pose.bones["s2"].constraints.remove(ik)
+obj = swinger()
+scene.frame_set(1)
+scene.waifu_physics.fast_evaluation = True
+scene.waifu_physics.simulate = True
+scene.frame_set(2)
+first = live.runtime(scene)
+obj.pose.bones["base"].keyframe_insert("location", frame=5)
+bpy.context.view_layer.update()
+scene.frame_set(3)
+check("keys added to a bone the chain hangs from are found again", live.runtime(scene) is not first)
+scene.waifu_physics.simulate = False
+scene.render.fps = 24
+rig = build()
+curves = chain_curves(rig)
+scene.frame_set(1)
+scene.waifu_physics.simulate = True
 
 # --- saving: the file gets the keys unmuted, the session keeps them taken over
 path = os.path.join(tempfile.gettempdir(), "waifu_physics_fast_paths.blend")

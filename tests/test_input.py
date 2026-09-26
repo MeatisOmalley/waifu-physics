@@ -76,8 +76,18 @@ for f in range(2, 11):
     scene.frame_set(f)
     shown[f] = np.array(base.pose.bones["Root"].head) + np.array(base.matrix_world.translation)
 rt = live.runtime(scene)
-check("a root driven by a constraint moves the solver's input with it (live: one frame late)",
+check("a root driven by a constraint moves the solver's input with it, on time (Fast Evaluation off)",
+      np.allclose(point_head(rt, "Root"), shown[10], atol=1e-5), (point_head(rt, "Root"), shown[10]))
+scene.waifu_physics.simulate = False
+scene.frame_set(1)
+scene.waifu_physics.fast_evaluation = True
+scene.waifu_physics.simulate = True
+for f in range(2, 11):
+    scene.frame_set(f)
+rt = live.runtime(scene)
+check("... and a frame late with Fast Evaluation on: a constraint's result is only known after evaluation",
       np.allclose(point_head(rt, "Root"), shown[9], atol=1e-5), (point_head(rt, "Root"), shown[9]))
+scene.waifu_physics.fast_evaluation = False
 check("... and the warning names the constrained bones in the group",
       sorted(links.constrained_bones(vroid, group)) == ["Head", "Root"], links.constrained_bones(vroid, group))
 

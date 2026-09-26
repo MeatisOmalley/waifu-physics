@@ -153,6 +153,120 @@ class ChainKeys:
             buffers[channel][bone * CHANNELS[channel] + index] = curve.evaluate(frame)
 
 
+OBJECT_CHANNELS = {"location": 3, "rotation_quaternion": 4, "rotation_euler": 3, "rotation_axis_angle": 4, "scale": 3}
+OBJECT_BLOCKERS = ("delta_location", "delta_rotation_euler", "delta_rotation_quaternion", "delta_scale")
+
+
+def _foreign_paths(data):
+    """Data paths something other than the action animates: unmuted NLA strips and drivers."""
+    found = []
+    for track in data.nla_tracks:
+        if track.mute:
+            continue
+        for strip in track.strips:
+            if strip.mute or strip.action is None:
+                continue
+            slot = getattr(strip, "action_slot", None)
+            for layer in strip.action.layers:
+                for s in layer.strips:
+                    bag = s.channelbag(slot) if slot is not None else None
+                    found += [c.data_path for c in (bag.fcurves if bag else ())]
+    return found + [d.data_path for d in data.drivers]
+
+
+class InputKeys:
+    """The keys of what the chains hang from, sampled for the frame without being taken over, so the
+    one-evaluation path reads this frame's input before Blender evaluates it (Blender still applies these
+    curves itself: the bones and the armature must show). Covers the bones above the chains and those
+    colliders hang from, and the armature object's transform, where nothing but the armature's own action
+    moves them: a bone with a constraint, a driver or NLA animation, one an IK constraint can reach, and any
+    bone below those keep Blender's last evaluation (a frame late), as does an object with a parent,
+    constraints, drivers or NLA on its transform, or delta transforms."""
+
+    def __init__(self, rig, wanted):
+        obj = rig.obj
+        self.data = obj.animation_data
+        self.action = self.data.action if self.data is not None else None
+        self.curves = []                   # (fcurve, bone index, channel, array index)
+        self.object_curves = []            # (fcurve, channel, array index)
+        blocked = set()
+        for i, pb in enumerate(obj.pose.bones):
+            for c in pb.constraints:
+                if not c.enabled or c.influence <= 0:
+                    continue
+                blocked.add(i)
+                if c.type in ("IK", "SPLINE_IK"):      # an IK chain moves the bones above its owner too
+                    reach, bone = getattr(c, "chain_count", 0), pb.parent
+                    depth = 1
+                    while bone is not None and (reach == 0 or depth < reach):
+                        blocked.add(rig.index[bone.name])
+                        bone, depth = bone.parent, depth + 1
+        data = self.data
+        foreign = _foreign_paths(data) if data is not None else []
+        blocked |= {rig.index[found[0]] for found in map(_bone_path, foreign) if found and found[0] in rig.index}
+        whole = data is None or (data.action_influence >= 1.0 and data.action_blend_type == "REPLACE")
+        own = _action_curves(data) if data is not None else []
+        if not whole:
+            blocked |= {rig.index[found[0]] for found in map(_bone_path, (c.data_path for c in own))
+                        if found and found[0] in rig.index}
+        ok = np.zeros(rig.count, dtype=bool)
+        for i in range(rig.count):                     # parents first: a bone under a blocked one is out too
+            p = rig.parents[i]
+            ok[i] = i not in blocked and (p < 0 or ok[p])
+        self.bones = np.array(sorted(i for i in set(wanted) if ok[i] and not rig.chain[i]), dtype=int)
+        chosen = {rig.names[i] for i in self.bones}
+        for curve in own:
+            found = _bone_path(curve.data_path)
+            if found and found[0] in chosen and not curve.mute:
+                self.curves.append((curve, rig.index[found[0]], found[1], curve.array_index))
+        self.object_ok = (whole and obj.parent is None
+                          and not any(c.enabled and c.influence > 0 for c in obj.constraints)
+                          and not any(p in OBJECT_CHANNELS or p in OBJECT_BLOCKERS for p in foreign)
+                          and not any(p.startswith("delta_") for p in (c.data_path for c in own))
+                          and tuple(obj.delta_location) == (0, 0, 0) and tuple(obj.delta_scale) == (1, 1, 1)
+                          and tuple(obj.delta_rotation_euler) == (0, 0, 0)
+                          and tuple(obj.delta_rotation_quaternion) == (1, 0, 0, 0))
+        if self.object_ok:
+            self.object_curves = [(c, c.data_path, c.array_index) for c in own
+                                  if c.data_path in OBJECT_CHANNELS and not c.mute]
+        self.total = self._count()
+
+    def _count(self):
+        """What the sampled curves were found from: the action, and its curves (with their mute flags)."""
+        data = self.data
+        try:
+            return (data.action, len(_action_curves(data)), tuple(c.mute for c in _action_curves(data)))                 if data is not None else None
+        except ReferenceError:
+            return None
+
+    def changed(self):
+        """Curves added, removed or muted, or another action: the curves must be found again."""
+        return self._count() != self.total
+
+    def sample(self, frame, buffers):
+        """This frame's keyed values into the bones' channel buffers."""
+        for curve, bone, channel, index in self.curves:
+            buffers[channel][bone * CHANNELS[channel] + index] = curve.evaluate(frame)
+
+    def world(self, obj, frame):
+        """The armature object's world matrix at frame, or None when it cannot be known before evaluation."""
+        if not self.object_ok:
+            return None
+        from mathutils import Euler, Matrix, Quaternion, Vector
+        values = {path: list(getattr(obj, path)) for path in OBJECT_CHANNELS}
+        for curve, path, index in self.object_curves:
+            values[path][index] = curve.evaluate(frame)
+        mode = obj.rotation_mode
+        if mode == "QUATERNION":
+            rotation = Quaternion(values["rotation_quaternion"]).normalized()
+        elif mode == "AXIS_ANGLE":
+            angle, *axis = values["rotation_axis_angle"]
+            rotation = Quaternion(Vector(axis), angle)
+        else:
+            rotation = Euler(values["rotation_euler"], mode)
+        return Matrix.LocRotScale(Vector(values["location"]), rotation, Vector(values["scale"]))
+
+
 def recover(objects):
     """Unmute curves a previous session left muted (it ended while simulating)."""
     for obj in objects:

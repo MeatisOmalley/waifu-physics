@@ -210,6 +210,39 @@ check("under a parent scaled unevenly, every bone's head lands on its simulated 
       max(off) < 0.5, max(off))
 scene.waifu_physics.simulate = False
 
+# --- the skew guard only runs where a frame really is distorted: Aligned puts the scale on each bone's own
+# axes after its frame, so there frames are square and even (float noise aside) and the guard stays off
+io = sys.modules["waifu_physics.runtime.io"]
+for bone in skew.data.bones:
+    if bone.name != "head":
+        bone.inherit_scale = "ALIGNED"
+guard_calls = []
+plain_aimed = io._aimed
+io._aimed = lambda *a: (guard_calls.append(len(a[0])), plain_aimed(*a))[1]
+scene.frame_set(1)
+scene.waifu_physics.simulate = True
+for frame in range(2, 21):
+    scene.frame_set(frame)
+bpy.context.view_layer.update()
+rt = live.runtime(scene)
+s = rt.system
+off = [np.linalg.norm(np.array(skew.pose.bones[s.bone_names[i]].head) - s.loc[i] / rt.cm) * 1000
+       for i in range(len(s.loc)) if s.bone_names[i]]
+check("under Aligned the heads land on their points too, with the skew guard never running",
+      max(off) < 0.5 and not guard_calls, (max(off), sum(guard_calls)))
+io._aimed = plain_aimed
+scene.waifu_physics.simulate = False
+for bone in skew.data.bones:
+    bone.inherit_scale = "FULL"
+turn = io.unscaled(np.array(skew.pose.bones["head"].matrix)[None, :3, :3])[0]      # a rotation
+noise = np.random.default_rng(3).normal(scale=2e-6, size=(3, 3))       # single-precision pose noise
+distorted, skewed = io._distortion(np.array([turn * 1.7, turn + noise, turn * (1.001, 1.0, 1.001),
+                                             turn @ [[1, 0.2, 0], [0, 1, 0], [0, 0, 1]], turn * (1, 1, -1)]))
+check("scaled evenly or off by float noise, a frame is neither; unevenly (even by 0.1%) but square only needs "
+      "aiming; skewed or mirrored needs both",
+      list(distorted) == [False, False, True, True, True] and list(skewed) == [False, False, False, True, True],
+      (list(distorted), list(skewed)))
+
 # --- every Inherit Scale, Inherit Rotation and Local Location: the pose predicted is the pose Blender evaluates
 io = sys.modules["waifu_physics.runtime.io"]
 MODES = ("FULL", "FIX_SHEAR", "ALIGNED", "AVERAGE", "NONE", "NONE_LEGACY")

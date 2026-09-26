@@ -363,6 +363,44 @@ anchor_collider = next(obj for obj in made if obj.parent_bone == "anchor")
 check("... and making a bone active picks its collider",
       settings.active_collider == bpy.data.objects.find(anchor_collider.name))
 
+# --- Shift and Ctrl in the list: a range, and adding or dropping one (the viewport's selection, both ways)
+pick = bpy.ops.waifu_physics.collider_pick
+chosen = lambda: set(colliders.chosen(scene, bpy.data.objects.get(settings.last_collider)))
+listed = colliders.listed(bpy.context)
+on_bones = [obj for obj in listed if obj.parent == own]
+pick(name=on_bones[0].name)
+pick(name=on_bones[1].name, extend=True)
+check("in Pose Mode, Ctrl-click adds a collider: its bone joins the selection and is made active",
+      chosen() == set(on_bones[:2]) and own.data.bones.active.name == on_bones[1].parent_bone
+      and own.pose.bones[on_bones[0].parent_bone].select, sorted(obj.name for obj in chosen()))
+pick(name=on_bones[1].name, extend=True)
+check("... Ctrl-click on a selected one drops it, and the pick moves to one still selected",
+      chosen() == {on_bones[0]} and own.data.bones.active.name == on_bones[0].parent_bone)
+bpy.ops.object.mode_set(mode="OBJECT")
+second_plane = colliders.add_to_scene("Plane")
+listed = colliders.listed(bpy.context)
+pick(name=listed[0].name)
+pick(name=listed[-1].name, span=True)
+everything = {obj for obj in listed if obj.name in bpy.context.view_layer.objects}
+check("in Object Mode, Shift-click selects the run of listed colliders from the last one picked",
+      chosen() == everything and bpy.context.view_layer.objects.active == listed[-1]
+      and settings.last_collider == listed[0].name, (len(chosen()), len(everything)))
+pick(name=listed[-1].name, extend=True)
+check("... Ctrl-click drops the picked one, and another selected collider is picked",
+      listed[-1] not in chosen() and not listed[-1].select_get()
+      and colliders.is_collider(bpy.context.view_layer.objects.active))
+pick(name=second_plane.name)
+check("... a plain click picks one alone", chosen() == {second_plane})
+pick(name=floor_plane.name, extend=True)
+count = len(colliders.all_of(own))
+planes = (floor_plane.name, second_plane.name)
+check("the trash on the picked collider deletes every selected one",
+      bpy.ops.waifu_physics.collider_remove(name=planes[0]) == {"FINISHED"}
+      and not any(name in bpy.data.objects for name in planes))
+check("... and leaves the colliders that were not selected", len(colliders.all_of(own)) == count)
+bpy.context.view_layer.objects.active = own
+bpy.ops.object.mode_set(mode="POSE")
+
 # --- Regenerate replaces a bone's colliders with one fitted; Generate leaves them
 before = {obj.name for obj in colliders.all_of(own)}
 check("Generate skips bones that have a collider", colliders.from_bones(own, ["anchor"], "Sphere") == [])

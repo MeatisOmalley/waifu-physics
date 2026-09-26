@@ -51,15 +51,22 @@ class WAIFU_PHYSICS_PT_main(bpy.types.Panel):
         from ..runtime import live
         layout = self.layout
         scene, settings = context.scene, context.scene.waifu_physics
+        from . import manager
+        # With no group in the scene there is nothing to simulate: greyed, but a simulation or cache left on
+        # (say, every group deleted) can still be switched off.
+        grouped = any(obj.type == "ARMATURE" and len(obj.waifu_physics.groups) for obj in scene.objects)
         row = layout.row(align=True)
         row.scale_y = 1.3
+        row.enabled = grouped or settings.simulate
         row.prop(settings, "simulate", toggle=True, icon="PHYSICS")
         row.operator("waifu_physics.reset", text="", icon="FILE_REFRESH")
         current = live._runtimes.get(scene.as_pointer())
         span = current.cached_range() if live.is_cached(scene) else None
         row = layout.row(align=True)
-        row.operator("waifu_physics.cache_toggle", text=f"Cached  {span[0]}-{span[1]}" if span else "Cache",
-                     icon="DISK_DRIVE", depress=span is not None)
+        cache = row.row(align=True)
+        cache.enabled = grouped or span is not None
+        cache.operator("waifu_physics.cache_toggle", text=f"Cached  {span[0]}-{span[1]}" if span else "Cache",
+                       icon="DISK_DRIVE", depress=span is not None)
         row.operator("waifu_physics.bake", icon="KEYFRAME")          # greyed until cached (its poll)
         if span is not None and current.outdated:                   # kept, not thrown away: say so
             warning = layout.column(align=True)
@@ -69,15 +76,15 @@ class WAIFU_PHYSICS_PT_main(bpy.types.Panel):
             warning.operator("waifu_physics.cache_all", text="Recache", icon="FILE_REFRESH")
         if native.backend() is native.step_numpy:
             layout.label(text=f"Using the slower numpy step: {native.reason()}", icon="INFO")
-        from . import manager
-        if manager.listed(context):              # any armature with a group, selected or not
-            showing = manager.is_open(context.area)
-            layout.operator("waifu_physics.chain_manager", icon="OUTLINER", depress=showing,
-                            text="Hide Chain Manager" if showing else "Chain Manager")
-            if showing and not context.space_data.show_gizmo:
-                note = layout.row()
-                note.alert = True
-                note.label(text="Turn on Gizmos in the viewport header to see it.", icon="ERROR")
+        showing = manager.is_open(context.area)
+        row = layout.row()
+        row.enabled = grouped or showing          # an open manager can always be closed
+        row.operator("waifu_physics.chain_manager", icon="OUTLINER", depress=showing,
+                     text="Hide Chain Manager" if showing else "Chain Manager")
+        if showing and not context.space_data.show_gizmo:
+            note = layout.row()
+            note.alert = True
+            note.label(text="Turn on Gizmos in the viewport header to see it.", icon="ERROR")
         _draw_groups(layout, context)
         _draw_group_tools(layout, context, span)
 
@@ -260,16 +267,36 @@ def _setting_row(column, group, name):
             box.template_curve_mapping(node, "mapping")
 
 
-class WAIFU_PHYSICS_PT_advanced(_GroupPanel, bpy.types.Panel):
+class WAIFU_PHYSICS_PT_advanced(bpy.types.Panel):
+    """Always shown: the solver's settings are the scene's, for every armature. The active group's advanced
+    settings follow when there is one, greyed while a cache plays (as _GroupPanel greys the others)."""
     bl_idname = "WAIFU_PHYSICS_PT_advanced"
     bl_label = "Advanced"
     bl_options = {"DEFAULT_CLOSED"}
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "Waifu Physics"
+    bl_parent_id = "WAIFU_PHYSICS_PT_main"
 
-    def draw_settings(self, context):
-        group = self.group(context)
+    def draw(self, context):
+        from ..runtime import live
         layout = self.layout
         layout.use_property_split = True
         layout.use_property_decorate = False
+        settings = context.scene.waifu_physics
+        layout.label(text="Solver")
+        layout.prop(settings, "target_framerate")
+        live_playback = layout.column(heading="Live Playback")
+        live_playback.prop(settings, "fixed_substepping")
+        live_playback.prop(settings, "fast_evaluation")
+        if _GroupPanel.poll(context):
+            group_settings = layout.column()
+            group_settings.enabled = not live.is_cached(context.scene)
+            group_settings.separator()
+            self.draw_group(group_settings, _GroupPanel.group(context))
+
+    @staticmethod
+    def draw_group(layout, group):
         layout.label(text="Chain Shape")
         layout.prop(group, "dummy_bone_length")
         layout.prop(group, "bone_subdivision_count")
@@ -289,11 +316,6 @@ class WAIFU_PHYSICS_PT_advanced(_GroupPanel, bpy.types.Panel):
         layout.prop(group, "teleport_distance")
         layout.prop(group, "teleport_rotation")
         layout.prop(group, "warm_up_frames")
-        settings = context.scene.waifu_physics
-        layout.separator()
-        layout.label(text="Scene")
-        layout.prop(settings, "target_framerate")
-        layout.column(heading="Live Playback").prop(settings, "fixed_substepping")
         layout.separator()
         layout.label(text="Setup File")
         files = layout.row(align=True)
@@ -337,21 +359,18 @@ class WAIFU_PHYSICS_PT_links(_GroupPanel, bpy.types.Panel):
         row.operator("waifu_physics.links_clear", icon="TRASH")
         layout.use_property_split = True
         layout.prop(group, "compliance")
-        layout.prop(group, "iterations_before_collision", text="Before Collision")
-        layout.prop(group, "iterations_after_collision", text="After Collision")
         layout.prop(group, "auto_child_dummy_links")
         layout.prop(group, "bridge_count")
         sub = layout.column()
         sub.active = group.bridge_count > 0
         sub.prop(group, "bridge_feedback")
-
-
-def _collider_armatures(context):
-    """The armatures the Colliders page lists, in the scene's order: every one with colliders, and the active
-    one, so it can be given its first. What is listed follows what exists, not what is selected."""
-    active = colliders.armature_of(context)
-    return [obj for obj in context.scene.objects
-            if obj.type == "ARMATURE" and (obj == active or colliders.all_of(obj))]
+        # Rarely touched (Kawaii's 1 and 1 suit most): which wins where links and colliders disagree.
+        header, body = layout.panel("waifu_physics_link_iterations", default_closed=True)
+        header.label(text="Iterations")
+        if body is not None:
+            body.prop(group, "iterations_before_collision", text="Before Collision")
+            body.prop(group, "iterations_after_collision", text="After Collision")
+            _caption(body, "More before holds the spacing firmer.", "Fewer after lets colliders win.")
 
 
 def _dim(layout, text, icon="NONE"):
@@ -380,9 +399,9 @@ def _folder_row(layout, owner, prop, text, icon, count, armature=None, active=Fa
     return shown
 
 
-def _collider_row(layout, obj, picked, indent=True):
-    """A collider's row, in its folder: on or off, its shape and name (picks it; lit when picked), and the bone
-    it is on, dimmed (red if a chain simulates that bone)."""
+def _collider_row(layout, obj, picked, chosen, indent=True):
+    """A collider's row, in its folder: on or off, its shape and name (picks it; lit when picked, lit dimmer when
+    only selected, as the outliner shades them), and the bone it is on, dimmed (red if a chain simulates it)."""
     found = colliders.values(obj) or {}
     row = layout.row(align=True)
     if indent:
@@ -390,8 +409,10 @@ def _collider_row(layout, obj, picked, indent=True):
     row.prop(obj.waifu_physics_collider, "enabled", text="")
     name = row.row(align=True)
     name.alignment = "LEFT"                      # as the armatures' names: lit like them when picked
-    name.emboss = "NORMAL" if obj == picked else "NONE"
-    name.operator("waifu_physics.collider_pick", text=obj.name, depress=obj == picked,
+    lit = obj == picked or obj in chosen
+    name.emboss = "NORMAL" if lit else "NONE"
+    name.active = obj == picked or not lit
+    name.operator("waifu_physics.collider_pick", text=obj.name, depress=lit,
                   icon=colliders.SHAPE_ICONS.get(found.get("Shape"), "MESH_UVSPHERE")).name = obj.name
     where = row.row()
     where.alignment = "RIGHT"
@@ -439,6 +460,7 @@ def _draw_colliders(layout, context):
     index = settings.active_collider
     picked = bpy.data.objects[index] if 0 <= index < len(bpy.data.objects) else None
     picked = picked if colliders.is_collider(picked) else None
+    chosen = colliders.chosen(context.scene, bpy.data.objects.get(settings.last_collider))
     obj = context.object
     groups = obj.waifu_physics.groups if obj is not None and obj.type == "ARMATURE" else ()
     group = groups[min(obj.waifu_physics.active_group, len(groups) - 1)] if len(groups) else None
@@ -450,7 +472,7 @@ def _draw_colliders(layout, context):
             _chain_radius(body, context, group)
             body.separator()
         _add_to_bones(body, context, settings)
-        armatures = _collider_armatures(context)
+        armatures = colliders.listed_armatures(context)
         tree = body.box().column(align=True)
         active = colliders.armature_of(context)
         for number, rig in enumerate(armatures):
@@ -460,7 +482,7 @@ def _draw_colliders(layout, context):
             if _folder_row(tree, rig.waifu_physics, "colliders_expanded", rig.name, "ARMATURE_DATA", len(found),
                            rig, rig == active):
                 for collider in found:
-                    _collider_row(tree, collider, picked)
+                    _collider_row(tree, collider, picked, chosen)
                 if not found:
                     hint = tree.row()
                     hint.separator(factor=1.6)
@@ -481,7 +503,7 @@ def _draw_colliders(layout, context):
         if found:
             listed = body.box().column(align=True)
             for collider in found:
-                _collider_row(listed, collider, picked, indent=False)
+                _collider_row(listed, collider, picked, chosen, indent=False)
 
     if group is not None:
         header, body = layout.panel("waifu_physics_collides_against", default_closed=False)
@@ -495,6 +517,8 @@ def _draw_colliders(layout, context):
             (colliders.values(picked) or {}).get("Shape"), "MESH_UVSPHERE"))
         trash = header.row()
         trash.alignment = "RIGHT"
+        if len(chosen) > 1:                      # the trash deletes them all: say how many
+            _dim(trash, f"{len(chosen)} selected")
         trash.operator("waifu_physics.collider_remove", text="", icon="TRASH", emboss=False).name = picked.name
         if body is not None:
             _collider_settings(body, picked)

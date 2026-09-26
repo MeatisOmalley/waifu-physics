@@ -105,6 +105,67 @@ def neighbours(obj, names):
     return list(zip(order, order[1:]))
 
 
+def _root_and_depth(obj, group, name):
+    """(root, bones below it) of the group's chain a bone is simulated in, or None: a bone under an excluded
+    one (or under another group's root, which excludes it) is not."""
+    roots = {root.name for root in group.roots}
+    excluded = {bone.name for bone in group.excluded}
+    bone, depth = obj.pose.bones.get(name), 0
+    while bone is not None:
+        if bone.name in excluded:
+            return None
+        if bone.name in roots:
+            return bone.name, depth
+        bone, depth = bone.parent, depth + 1
+    return None
+
+
+def _in_line(obj, a, b):
+    """Does one bone hang from the other, however far down?"""
+    def above(upper, lower):
+        bone = obj.pose.bones[lower].parent
+        while bone is not None:
+            if bone.name == upper:
+                return True
+            bone = bone.parent
+        return False
+    return above(a, b) or above(b, a)
+
+
+def bone_pairs(obj, group, names):
+    """Link Selected Bones: (the new links, None), or ([], why there are none). Only bones the group simulates
+    below its roots count: a root follows the animation, so a link to it holds nothing (Kawaii moves both ends,
+    and the pose puts the root back). Two bones make one link unless one hangs from the other: their chain
+    already keeps that distance, and a link along it only stiffens the chain. More are linked side by side
+    (side_by_side) at each depth below the roots, as Link Whole Chains does, so bones of one chain never are.
+    Kawaii checks none of this (any two of a node's bones make a constraint); these are the links that do
+    what links are for, holding neighbouring chains apart."""
+    depth = {}
+    for name in names:
+        found = _root_and_depth(obj, group, name)
+        if found is not None and found[1] > 0:
+            depth[name] = found[1]
+    if len(depth) < 2:
+        return [], "Select two bones in different chains of the active group, below their roots"
+    if len(depth) == 2:
+        a, b = depth
+        if _in_line(obj, a, b):
+            return [], "One bone hangs from the other: its chain already keeps them apart"
+        found = [(a, b)]
+    else:
+        rows = {}
+        for name, level in depth.items():
+            rows.setdefault(level, []).append(name)
+        found = [pair for row in rows.values() if len(row) > 1 for pair in neighbours(obj, row)]
+        if not found:
+            return [], "Select two bones, or bones at the same depth in different chains"
+    existing = {frozenset((link.bone_a, link.bone_b)) for link in group.links}
+    found = [pair for pair in found if frozenset(pair) not in existing]
+    if not found:
+        return [], "The selected bones are already linked"
+    return found, None
+
+
 def pairs(obj, roots, excluded=()):
     """[(bone, bone)] linking each chain to its neighbour, at every depth below the roots (the roots do not
     move): a ladder's rungs between neighbouring chains, in side_by_side order, the two end chains left

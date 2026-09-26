@@ -17,6 +17,10 @@ QUATERNION, AXIS_ANGLE = 0, -1
 INHERIT_SCALE = {"FULL": 0, "FIX_SHEAR": 1, "ALIGNED": 2, "AVERAGE": 3, "NONE": 4, "NONE_LEGACY": 5}
 FULL, FIX_SHEAR, ALIGNED, AVERAGE, NONE, NONE_LEGACY = range(6)
 FLT_EPSILON = 1.1920929e-07
+# How far a bone's frame may be from a rotation and one scale before the write corrects for it (_distortion).
+# Measured: Blender's single-precision pose matrices alone leave frames up to 6e-6 off, while a slider scale
+# uneven by just 0.1% puts them 7e-4 off. Below this the error is under 1e-4 radians a bone: micrometres.
+DISTORTION = 1e-4
 
 
 def cm_per_unit(scene):
@@ -81,24 +85,38 @@ def _aimed(local, frame, direction):
     want = np.linalg.solve(frame, direction[:, :, None])[:, :, 0]
     want /= np.maximum(np.linalg.norm(want, axis=1, keepdims=True), 1e-12)
     have = local[:, :, 1]
-    axis = np.cross(have, want)
-    cos = np.einsum("ni,ni->n", have, want)
-    turn = np.tile(np.eye(3), (len(local), 1, 1))
-    ok = cos > -0.999999                        # opposite directions have no shortest turn: left as they are
+    hx, hy, hz = have[:, 0], have[:, 1], have[:, 2]
+    wx, wy, wz = want[:, 0], want[:, 1], want[:, 2]
+    ax, ay, az = hy * wz - hz * wy, hz * wx - hx * wz, hx * wy - hy * wx       # have x want
+    cos = hx * wx + hy * wy + hz * wz
     k = np.zeros((len(local), 3, 3))
-    k[:, 0, 1], k[:, 0, 2], k[:, 1, 2] = -axis[:, 2], axis[:, 1], -axis[:, 0]
-    k[:, 1, 0], k[:, 2, 0], k[:, 2, 1] = axis[:, 2], -axis[:, 1], axis[:, 0]
-    turn[ok] += k[ok] + (k[ok] @ k[ok]) / (1.0 + cos[ok])[:, None, None]
+    k[:, 0, 1], k[:, 0, 2], k[:, 1, 2] = -az, ay, -ax
+    k[:, 1, 0], k[:, 2, 0], k[:, 2, 1] = az, -ay, ax
+    # Rodrigues' turn, I + K + K^2 / (1 + cos); opposite directions have no shortest turn: left as they are.
+    ok = cos > -0.999999
+    turn = k @ k / np.where(ok, 1.0 + cos, 1.0)[:, None, None] + k
+    turn[:, 0, 0] += 1.0
+    turn[:, 1, 1] += 1.0
+    turn[:, 2, 2] += 1.0
+    turn[~ok] = np.eye(3)
     return turn @ local
 
 
-def _distorted(frame):
-    """Frames that are not a rotation and one scale: skewed, scaled unevenly or mirrored. There a local
-    rotation needs _nearest_rotations and _aimed; everywhere else they change nothing, so they are skipped."""
+def _distortion(frame):
+    """Which frames are not a rotation and one scale (scaled unevenly, skewed or mirrored), and of those, which
+    are skewed or mirrored. Distorted, a local rotation needs _aimed; skewed or mirrored, it is no rotation at
+    all through the frame and needs _nearest_rotations first. Scaled unevenly but square (Inherit Scale Aligned)
+    it is a rotation already. Everywhere else both change nothing, so they are skipped."""
     gram = np.einsum("nji,njk->nik", frame, frame)
-    size = np.trace(gram, axis1=1, axis2=2) / 3.0
+    lengths_sq = np.einsum("nii->ni", gram)
+    size = lengths_sq.sum(axis=1) / 3.0
+    mirrored = np.linalg.det(frame) < 0
     even = gram / np.where(size > 0.0, size, 1.0)[:, None, None]
-    return (np.abs(even - np.eye(3)).max(axis=(1, 2)) > 1e-6) | (np.linalg.det(frame) < 0)
+    distorted = (np.abs(even - np.eye(3)).max(axis=(1, 2)) > DISTORTION) | mirrored
+    lengths = np.sqrt(np.where(lengths_sq > 0.0, lengths_sq, 1.0))
+    square = gram / (lengths[:, :, None] * lengths[:, None, :])
+    skewed = (np.abs(square - np.eye(3)).max(axis=(1, 2)) > DISTORTION) | mirrored
+    return distorted, skewed & distorted
 
 
 def _normalized(v):
@@ -168,23 +186,27 @@ def unscaled(m):
 
 def quats_from_matrices(m):
     """Rotation matrices to quaternions in Unreal's (x, y, z, w) order (Shepperd's method)."""
-    n = len(m)
-    q = np.empty((n, 4))
-    trace = m[:, 0, 0] + m[:, 1, 1] + m[:, 2, 2]
-    for i in range(n):
-        r = m[i]
-        if trace[i] > 0.0:
-            s = np.sqrt(trace[i] + 1.0) * 2.0
-            q[i] = ((r[2, 1] - r[1, 2]) / s, (r[0, 2] - r[2, 0]) / s, (r[1, 0] - r[0, 1]) / s, 0.25 * s)
-        elif r[0, 0] > r[1, 1] and r[0, 0] > r[2, 2]:
-            s = np.sqrt(1.0 + r[0, 0] - r[1, 1] - r[2, 2]) * 2.0
-            q[i] = (0.25 * s, (r[0, 1] + r[1, 0]) / s, (r[0, 2] + r[2, 0]) / s, (r[2, 1] - r[1, 2]) / s)
-        elif r[1, 1] > r[2, 2]:
-            s = np.sqrt(1.0 + r[1, 1] - r[0, 0] - r[2, 2]) * 2.0
-            q[i] = ((r[0, 1] + r[1, 0]) / s, 0.25 * s, (r[1, 2] + r[2, 1]) / s, (r[0, 2] - r[2, 0]) / s)
-        else:
-            s = np.sqrt(1.0 + r[2, 2] - r[0, 0] - r[1, 1]) * 2.0
-            q[i] = ((r[0, 2] + r[2, 0]) / s, (r[1, 2] + r[2, 1]) / s, 0.25 * s, (r[1, 0] - r[0, 1]) / s)
+    q = np.empty((len(m), 4))
+    m00, m01, m02 = m[:, 0, 0], m[:, 0, 1], m[:, 0, 2]
+    m10, m11, m12 = m[:, 1, 0], m[:, 1, 1], m[:, 1, 2]
+    m20, m21, m22 = m[:, 2, 0], m[:, 2, 1], m[:, 2, 2]
+    trace = m00 + m11 + m22
+    w_big = trace > 0.0                                   # Shepperd's four cases, in the same order
+    x_big = ~w_big & (m00 > m11) & (m00 > m22)
+    y_big = ~w_big & ~x_big & (m11 > m22)
+    z_big = ~(w_big | x_big | y_big)
+    k = w_big
+    s = np.sqrt(trace[k] + 1.0) * 2.0
+    q[k] = np.stack([(m21[k] - m12[k]) / s, (m02[k] - m20[k]) / s, (m10[k] - m01[k]) / s, 0.25 * s], axis=1)
+    k = x_big
+    s = np.sqrt(1.0 + m00[k] - m11[k] - m22[k]) * 2.0
+    q[k] = np.stack([0.25 * s, (m01[k] + m10[k]) / s, (m02[k] + m20[k]) / s, (m21[k] - m12[k]) / s], axis=1)
+    k = y_big
+    s = np.sqrt(1.0 + m11[k] - m00[k] - m22[k]) * 2.0
+    q[k] = np.stack([(m01[k] + m10[k]) / s, 0.25 * s, (m12[k] + m21[k]) / s, (m02[k] - m20[k]) / s], axis=1)
+    k = z_big
+    s = np.sqrt(1.0 + m22[k] - m00[k] - m11[k]) * 2.0
+    q[k] = np.stack([(m02[k] + m20[k]) / s, (m12[k] + m21[k]) / s, 0.25 * s, (m10[k] - m01[k]) / s], axis=1)
     return q / np.linalg.norm(q, axis=1, keepdims=True)
 
 
@@ -228,6 +250,11 @@ class Rig:
         self.keyed = {}
         self.keys = None
         self.constrained = np.zeros(self.count, dtype=bool)
+        self.input_keys = None                 # chain_keys.InputKeys: what the chains hang from, sampled ahead
+        self.ahead_levels = []                 # sampled bones and chain bones by depth, parents first
+        self.world = obj.matrix_world.copy()   # the armature's world matrix this frame, as far as it is known
+        self.evaluated = None                  # the pose and world matrix as Blender last evaluated them
+        self.evaluated_world = self.world
 
     def alive(self):
         """The armature is still there with the bones this rig was built for. Its bones are read and written
@@ -272,6 +299,25 @@ class Rig:
         bones = self.obj.pose.bones
         self.constrained = np.array([any(c.enabled and c.influence > 0 for c in pb.constraints) for pb in bones])
 
+    def prepare_input(self, extra=()):
+        """What the one-evaluation path reads for this frame before Blender evaluates it (read_ahead): the
+        bones above the chains, and extra ones (bones colliders hang from) with theirs, where their keys can
+        be sampled (chain_keys.InputKeys); the rest stays Blender's last evaluation."""
+        wanted = set()
+        for i in list(np.flatnonzero(self.chain)) + [int(b) for b in extra]:
+            p = self.parents[i] if self.chain[i] else i
+            while p >= 0:
+                if not self.chain[p]:
+                    wanted.add(int(p))
+                p = self.parents[p]
+        self.input_keys = chain_keys.InputKeys(self, wanted)
+        rows = np.union1d(self.input_keys.bones, np.flatnonzero(self.chain)).astype(int)
+        depth = np.zeros(self.count, dtype=int)
+        for i in range(self.count):
+            p = self.parents[i]
+            depth[i] = depth[p] + 1 if p >= 0 else 0
+        self.ahead_levels = [rows[depth[rows] == d] for d in sorted(set(depth[rows]))]
+
     def subtree(self, roots, excluded):
         """Bones under the roots, as Kawaii collects them: an excluded bone cuts off its subtree."""
         excluded = set(excluded)
@@ -312,13 +358,16 @@ class Rig:
             bones.foreach_get(path, buffer)
         self.basis = self._basis()
         self.pose = evaluated
+        self.evaluated = evaluated
+        self.world = self.evaluated_world = self.obj.matrix_world.copy()
         return evaluated
 
-    def read_ahead(self):
-        """The input before Blender evaluates the frame (live's one-evaluation path): bones
-        outside the chains, and constrained chain bones, as Blender last evaluated them -- a
-        frame late -- and the chain rebuilt from its channels, which restore(frame) has just set
-        to this frame's keys or rest."""
+    def read_ahead(self, frame=None):
+        """The input before Blender evaluates the frame (live's one-evaluation path). The chain is rebuilt from
+        its channels, which restore(frame) has just set to this frame's keys or rest; the bones it hangs from
+        (and colliders' bones) are rebuilt from their keys sampled for the frame, and the armature's world
+        matrix too, where only its action moves them (prepare_input). Everything else -- constrained or driven
+        bones and whatever hangs below them -- is as Blender last evaluated it: a frame late."""
         bones = self.obj.pose.bones
         bones.foreach_get("matrix", self._matrices)
         evaluated = self._matrices.reshape(self.count, 4, 4).transpose(0, 2, 1).astype(np.float64)
@@ -326,15 +375,36 @@ class Rig:
         for path, buffer in self._buffers.items():
             bones.foreach_get(path, buffer)
         basis = self._basis()
+        keys = self.input_keys
+        if keys is not None and frame is not None and len(keys.bones):
+            keys.sample(frame, self._buffers)
+            basis[keys.bones] = self._basis_of(keys.bones)
         pose = evaluated.copy()
-        for level in self.chain_levels:
+        levels = self.ahead_levels if keys is not None and frame is not None else self.chain_levels
+        for level in levels:
             parent = self.parents[level]
             parent_pose = np.where((parent >= 0)[:, None, None], pose[np.maximum(parent, 0)], np.eye(4))
             rebuilt = _placed(*self._parent_transforms(level, parent_pose), basis[level])
-            pose[level] = np.where(self.constrained[level][:, None, None], evaluated[level], rebuilt)
+            keep = self.constrained[level] & self.chain[level]            # a constrained chain bone: Blender's
+            pose[level] = np.where(keep[:, None, None], evaluated[level], rebuilt)
+        world = keys.world(self.obj, frame) if keys is not None and frame is not None else None
+        self.evaluated = evaluated
+        self.evaluated_world = self.obj.matrix_world.copy()
+        self.world = world if world is not None else self.evaluated_world
         self.basis = basis
         self.pose = pose
         return pose
+
+    def _basis_of(self, rows):
+        """Local basis matrices from the bones' channels as they are in the buffers, every channel: Blender's
+        BKE_pchan_to_mat4 (location, then rotation -- a quaternion normalised -- then scale)."""
+        out = np.tile(np.eye(4), (len(rows), 1, 1))
+        location = self._buffers["location"].reshape(-1, 3)
+        scale = self._buffers["scale"].reshape(-1, 3)
+        for k, i in enumerate(rows):
+            out[k, :3, :3] = np.array(self._rotation_of(i).to_matrix()) * scale[i]
+            out[k, :3, 3] = location[i]
+        return out
 
     def _parent_transforms(self, level, parent_pose):
         """Blender's BKE_bone_parent_transform_calc_from_matrices for a level of bones: the matrix their basis
@@ -404,7 +474,7 @@ class Rig:
     def _rotation_of(self, i):
         mode = int(self._modes[i])
         if mode == QUATERNION:
-            return Quaternion(self._buffers["rotation_quaternion"][4 * i:4 * i + 4])
+            return Quaternion(self._buffers["rotation_quaternion"][4 * i:4 * i + 4]).normalized()
         if mode == AXIS_ANGLE:
             angle, x, y, z = self._buffers["rotation_axis_angle"][4 * i:4 * i + 4]
             return Quaternion((x, y, z), angle)
@@ -427,8 +497,8 @@ class Rig:
             placed[bones[move_location]] = True
             head[bones[move_location]] = location[move_location]
         out = self.pose.copy()
-        local_rot = {}
-        local_loc = {}
+        local_rot = np.zeros((self.count, 3, 3))
+        local_loc = np.zeros((self.count, 3))
         for level in self.chain_levels:
             parent = self.parents[level]
             parent_out = np.where((parent >= 0)[:, None, None], out[np.maximum(parent, 0)], np.eye(4))
@@ -436,15 +506,19 @@ class Rig:
             frame = rotscale[:, :3, :3]                                 # where the bone's basis starts
             frame_rot = unscaled(frame)
             local = np.einsum("nji,njk->nik", frame_rot, target_rot[level])
-            # Under a parent with uneven scale the frame is skewed or stretched, so that is no rotation, or
-            # not the one aimed. Blender makes a rotation of whatever the channel holds: predicting the pose
-            # from anything else puts every child's frame, and the head placed through it, off (measured:
-            # 22 cm at the tip of a VRoid hair strand under a 1.32 x 1.28 head scale). So: the nearest
-            # rotation, turned so the bone points where the simulation aimed it, through the frame.
-            distorted = _distorted(frame)
+            # Under a parent with uneven scale the frame is stretched (and, inherited in full, skewed), so the
+            # rotation above does not aim the bone where the simulation did, or is no rotation at all. Blender
+            # makes a rotation of whatever the channel holds: predicting the pose from anything else puts every
+            # child's frame, and the head placed through it, off (measured: 22 cm at the tip of a VRoid hair
+            # strand under a 1.32 x 1.28 head scale). So: the nearest rotation, where the frame is skewed or
+            # mirrored, then turned so the bone points where the simulation aimed it, through the frame.
+            distorted, skewed = _distortion(frame)
             if distorted.any():
-                local[distorted] = _aimed(_nearest_rotations(local[distorted]), frame[distorted],
-                                          target_rot[level][distorted][:, :, 1])
+                fixed = local[distorted]
+                bent = skewed[distorted]
+                if bent.any():
+                    fixed[bent] = _nearest_rotations(fixed[bent])
+                local[distorted] = _aimed(fixed, frame[distorted], target_rot[level][distorted][:, :, 1])
             basis = self.basis[level].copy()
             scale = np.linalg.norm(basis[:, :3, :3], axis=1)
             basis[:, :3, :3] = local * scale[:, None, :]
@@ -454,23 +528,25 @@ class Rig:
                 point = np.concatenate([head[level[moved]], np.ones((moved.sum(), 1))], axis=1)
                 basis[moved, :3, 3] = np.einsum("nij,nj->ni", inverse, point)[:, :3]
             out[level] = _placed(rotscale, loc, post, basis)
-            for k, i in enumerate(level):
-                local_rot[i] = local[k]
-                if moved[k]:
-                    local_loc[i] = basis[k, :3, 3]
-        self._write_channels(local_rot, local_loc)
+            local_rot[level] = local
+            local_loc[level] = basis[:, :3, 3]
+        rows = np.flatnonzero(self.chain)
+        moved = np.flatnonzero(placed)
+        self._write_channels(rows, local_rot[rows], moved, local_loc[moved])
         return out
 
-    def _write_channels(self, local_rot, local_loc):
-        """One foreach_set per changed channel array, each bone in its own rotation mode."""
+    def _write_channels(self, rows, local_rot, moved, moved_loc):
+        """One foreach_set per changed channel array, each bone in its own rotation mode. rows: the chain bones,
+        local_rot their local rotations; moved: the bones placed by location, moved_loc their local locations."""
         bones = self.obj.pose.bones
         changed = set()
+        modes = self._modes[rows]
         quat = self._buffers["rotation_quaternion"].reshape(-1, 4)
         euler = self._buffers["rotation_euler"].reshape(-1, 3)
         axis_angle = self._buffers["rotation_axis_angle"].reshape(-1, 4)
-        for i, rot in local_rot.items():
-            q = Matrix(rot.tolist()).to_quaternion()
-            mode = int(self._modes[i])
+        for k, i in enumerate(rows):
+            q = Matrix(local_rot[k].tolist()).to_quaternion()
+            mode = int(modes[k])
             if mode == QUATERNION:
                 quat[i] = q
                 changed.add("rotation_quaternion")
@@ -482,10 +558,8 @@ class Rig:
                 # Compatible with the current value, so angles do not flip between frames.
                 euler[i] = q.to_euler(EULER_ORDERS[mode], Euler(euler[i].tolist(), EULER_ORDERS[mode]))
                 changed.add("rotation_euler")
-        if local_loc:
-            location = self._buffers["location"].reshape(-1, 3)
-            for i, loc in local_loc.items():
-                location[i] = loc
+        if len(moved):
+            self._buffers["location"].reshape(-1, 3)[moved] = moved_loc
             changed.add("location")
         for path in changed:
             bones.foreach_set(path, self._buffers[path])

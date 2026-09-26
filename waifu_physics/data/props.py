@@ -535,11 +535,16 @@ class WaifuPhysicsArmature(PropertyGroup):
 class WaifuPhysicsScene(PropertyGroup):
     simulate: BoolProperty(name="Simulate", default=False, update=lambda self, context: _simulate_changed(self),
                            description="Simulate the chains while the timeline plays")
-    target_framerate: IntProperty(name="Steps per Second", default=60, min=1, max=480, update=_structure_changed,
+    # The running simulation's clock follows these on its next frame, without a rebuild (Runtime.sync_clock).
+    target_framerate: IntProperty(name="Steps per Second", default=60, min=1, max=480,
                                   description="Simulation steps per second. Changes how the settings feel")
     fixed_substepping: BoolProperty(
-        name="Fixed Steps", default=True, update=_structure_changed,
+        name="Fixed Steps", default=True,
         description="Step at a fixed rate in live playback. Off steps once per frame")
+    fast_evaluation: BoolProperty(
+        name="Fast Evaluation (Live Preview)", default=False,
+        description=("Live playback evaluates each frame once, reacting to the body a frame late. Off reacts on "
+                     "time but evaluates each frame twice. The cache is always perfectly accurate"))
     edit_selected_groups: BoolProperty(
         name="Edit Selected Groups", default=True,
         description="Changes apply to every group with a selected bone")

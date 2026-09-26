@@ -465,19 +465,31 @@ class WAIFU_PHYSICS_OT_collider_set_remove(bpy.types.Operator):
         return {"FINISHED"}
 
 
+def _chosen_colliders(context):
+    settings = context.scene.waifu_physics
+    return colliders.chosen(context.scene, bpy.data.objects.get(settings.last_collider))
+
+
 class WAIFU_PHYSICS_OT_collider_remove(bpy.types.Operator):
     bl_idname = "waifu_physics.collider_remove"
     bl_label = "Remove Collider"
-    bl_description = "Delete this collider"
     bl_options = {"REGISTER", "UNDO"}
 
     name: bpy.props.StringProperty()
+
+    @classmethod
+    def description(cls, context, properties):
+        chosen = _chosen_colliders(context)
+        many = len(chosen) > 1 and bpy.data.objects.get(properties.name) in chosen
+        return "Delete the selected colliders" if many else "Delete this collider"
 
     def execute(self, context):
         obj = bpy.data.objects.get(self.name)
         if not colliders.is_collider(obj):
             return {"CANCELLED"}
-        colliders.remove(obj)
+        chosen = _chosen_colliders(context)
+        for doomed in chosen if obj in chosen else [obj]:     # the one picked stands for the whole selection
+            colliders.remove(doomed)
         live.mark_dirty(context.scene)
         return {"FINISHED"}
 
@@ -485,16 +497,36 @@ class WAIFU_PHYSICS_OT_collider_remove(bpy.types.Operator):
 class WAIFU_PHYSICS_OT_collider_pick(bpy.types.Operator):
     bl_idname = "waifu_physics.collider_pick"
     bl_label = "Pick Collider"
-    bl_description = "Select this collider (in Pose Mode, its bone)"
+    bl_description = ("Select this collider (in Pose Mode, its bone). Shift selects a range, Ctrl adds or removes")
     bl_options = {"REGISTER", "UNDO"}
 
     name: bpy.props.StringProperty()
+    extend: bpy.props.BoolProperty(options={"SKIP_SAVE"})
+    span: bpy.props.BoolProperty(options={"SKIP_SAVE"})
+
+    def invoke(self, context, event):
+        # As in a file browser: Shift selects a range, Ctrl adds or drops one.
+        self.span, self.extend = event.shift, event.ctrl
+        return self.execute(context)
 
     def execute(self, context):
         obj = bpy.data.objects.get(self.name)
         if not colliders.is_collider(obj):
             return {"CANCELLED"}
-        context.scene.waifu_physics.active_collider = bpy.data.objects.find(obj.name)      # picks it
+        scene, settings = context.scene, context.scene.waifu_physics
+        listed = colliders.listed(context)
+        last = bpy.data.objects.get(settings.last_collider)
+        if self.span and last in listed and obj in listed:
+            a, b = sorted((listed.index(last), listed.index(obj)))
+            colliders.select(scene, listed[a:b + 1], activate=obj)     # the anchor stays where it was
+        elif self.extend and obj in _chosen_colliders(context):
+            now = colliders.unpick(scene, obj)
+            settings.last_collider = now.name if now is not None else ""
+        elif self.extend:
+            colliders.select(scene, [obj], activate=obj)
+            settings.last_collider = obj.name
+        else:
+            settings.active_collider = bpy.data.objects.find(obj.name)      # picks it, alone
         return {"FINISHED"}
 
 
@@ -525,27 +557,37 @@ def _add_links(group, found):
 class WAIFU_PHYSICS_OT_link_bones(_PoseBonesOperator, bpy.types.Operator):
     bl_idname = "waifu_physics.link_bones"
     bl_label = "Link Selected Bones"
-    bl_description = "Link the selected bones to each other. Two bones make one link"
+    bl_description = ("Link two selected bones in different chains. With more, bones at the same depth link "
+                      "to their neighbours")
     bl_options = {"REGISTER", "UNDO"}
+
+    @staticmethod
+    def pairs(context):
+        """The links it would add, and why there are none (links.bone_pairs)."""
+        obj = context.object
+        group = obj.waifu_physics.groups[obj.waifu_physics.active_group]
+        names = [pb.name for pb in context.selected_pose_bones if pb.id_data == obj]
+        return chain_links.bone_pairs(obj, group, names)
 
     @classmethod
     def poll(cls, context):
-        return super().poll(context) and len(context.object.waifu_physics.groups) > 0
+        if not super().poll(context) or len(context.object.waifu_physics.groups) == 0:
+            return False
+        found, why = cls.pairs(context)
+        if why:
+            cls.poll_message_set(why)
+        return bool(found)
 
     def execute(self, context):
         obj = context.object
         group = obj.waifu_physics.groups[obj.waifu_physics.active_group]
-        excluded = {bone.name for bone in group.excluded}
-        names = [pb.name for pb in context.selected_pose_bones if pb.id_data == obj]
-        inside = [name for name in names if name not in excluded and _chain_root(obj, group, name) is not None]
-        if len(inside) < 2:
-            self.report({"WARNING"}, "Select at least two bones of the active group's chains")
+        found, why = self.pairs(context)
+        if not found:
+            self.report({"WARNING"}, why)
             return {"CANCELLED"}
-        added = _add_links(group, chain_links.neighbours(obj, inside))
+        added = _add_links(group, found)
         live.mark_dirty(context.scene)
-        outside = len(names) - len(inside)
-        self.report({"INFO"}, f"Added {added} link{'' if added == 1 else 's'}"
-                              + (f"; {outside} selected bones are not in the group" if outside else ""))
+        self.report({"INFO"}, f"Added {added} link{'' if added == 1 else 's'}")
         return {"FINISHED"}
 
 
@@ -556,11 +598,9 @@ class WAIFU_PHYSICS_OT_link_chains(_PoseBonesOperator, bpy.types.Operator):
                       "The two end chains stay unlinked: link them to close a ring")
     bl_options = {"REGISTER", "UNDO"}
 
-    @classmethod
-    def poll(cls, context):
-        return super().poll(context) and len(context.object.waifu_physics.groups) > 0
-
-    def execute(self, context):
+    @staticmethod
+    def roots(context):
+        """The active group's chains with a bone selected, by root, in selection order."""
         obj = context.object
         group = obj.waifu_physics.groups[obj.waifu_physics.active_group]
         roots = []
@@ -568,6 +608,21 @@ class WAIFU_PHYSICS_OT_link_chains(_PoseBonesOperator, bpy.types.Operator):
             root = _chain_root(obj, group, pose_bone.name)
             if root is not None and root not in roots:
                 roots.append(root)
+        return roots
+
+    @classmethod
+    def poll(cls, context):
+        if not super().poll(context) or len(context.object.waifu_physics.groups) == 0:
+            return False
+        if len(cls.roots(context)) < 2:
+            cls.poll_message_set("Select bones in two or more chains of the active group")
+            return False
+        return True
+
+    def execute(self, context):
+        obj = context.object
+        group = obj.waifu_physics.groups[obj.waifu_physics.active_group]
+        roots = self.roots(context)
         if len(roots) < 2:
             self.report({"WARNING"}, "Select bones in at least two chains of the active group")
             return {"CANCELLED"}

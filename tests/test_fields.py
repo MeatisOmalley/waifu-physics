@@ -135,6 +135,27 @@ check("types the chains cannot feel are listed but give no spec",
       unfelt in scene_fields.field_objects(scene) and scene_fields.spec_of(unfelt) is None)
 bpy.context.view_layer.objects.active = rig
 
+# --- Cache All disables what the simulation does not read while it bakes; every field is read, not only wind
+wind.field.strength = 0.0
+bpy.ops.object.effector_add(type="FORCE", location=(-1.0, 0.0, 0.5))    # pushes the chain along +X
+force = bpy.context.object
+force.field.strength = 4.0
+bpy.context.view_layer.objects.active = rig
+played = tip_x_after(29)
+scene.frame_set(1)
+bpy.ops.waifu_physics.cache_toggle()
+scene.frame_set(30)
+baked = rig.pose.bones["b3"].tail.x
+check("a Force field pushes the chain in a bake as it does in live playback",
+      played > 0.02 and 0.8 < baked / played < 1.25, (played, baked))
+check("... and the bake leaves every object as it found it",
+      not any(obj.hide_viewport for obj in scene.objects))
+bpy.ops.waifu_physics.cache_toggle()
+scene.waifu_physics.simulate = False
+bpy.data.objects.remove(force)
+wind.field.strength = 4.0
+bpy.context.view_layer.objects.active = rig
+
 # --- old setups: the simple force becomes a Push, scene wind and Kawaii's Wind force turn on force fields
 old = rig.waifu_physics.groups.add()
 old.simple_external_force = (0.0, 30.0, 0.0)

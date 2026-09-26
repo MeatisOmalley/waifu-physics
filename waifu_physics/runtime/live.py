@@ -139,7 +139,8 @@ class Runtime:
         # Stiffness and damping act per step, so the step rate stays the scene's simulation rate
         # (Kawaii's 60 Hz by default) whatever the frame rate. Above it a frame can fall between
         # steps; live playback then shows the chains between the last two steps.
-        self.interpolate = (target_framerate is None
+        self.scene_clock = target_framerate is None
+        self.interpolate = (self.scene_clock
                             and scene.render.fps / scene.render.fps_base > s.target_framerate)
         self.real = np.flatnonzero(s.bone >= 0)
         combined = s.bone[self.real]
@@ -150,6 +151,17 @@ class Runtime:
             rig.keys.mute()                # Waifu Physics samples the chains' keys itself while it simulates
         # One evaluation a frame needs every chain's keys to be Waifu Physics' (keys.py).
         self.fast = all(rig.keys.ownable for rig in self.rigs)
+        # ... and reads this frame's input where it can be known before evaluation: the bones the chains
+        # hang from and those the groups' colliders hang from (Rig.prepare_input).
+        on_bones = {rig.uid: set() for rig in self.rigs}
+        for g in range(len(self.group_props)):
+            for obj in collider_objects.group_colliders(self._group(g)[1], scene):
+                if obj.parent_type == "BONE" and obj.parent is not None and obj.parent.session_uid in on_bones:
+                    rig = next(x for x in self.rigs if x.uid == obj.parent.session_uid)
+                    if obj.parent_bone in rig.index:
+                        on_bones[rig.uid].add(rig.index[obj.parent_bone])
+        for rig in self.rigs:
+            rig.prepare_input(on_bones[rig.uid])
         # Force filters and sync targets name bones; the points of each group by bone name.
         for i in self.real:
             s.bone_names[i] = names[s.bone[i]].split("|", 1)[1]
@@ -283,7 +295,7 @@ class Runtime:
             return None
         s = self.system
         rows = np.flatnonzero(s.group == g)
-        world = np.array(rig.obj.matrix_world)
+        world = np.array(rig.world)
         turn = world[:3, :3]
         positions = (s.loc[rows] / self.cm) @ turn.T + world[:3, 3]
         dt = max(float(s.dt_old), 1.0e-6)
@@ -352,7 +364,8 @@ class Runtime:
         """This frame's input pose and component movement into the system. ahead: before Blender
         evaluates the frame, from its last evaluation (Rig.read_ahead)."""
         s = self.system
-        poses = [rig.read_ahead() if ahead else rig.read() for rig in self.rigs]
+        frame = frame_of(scene)
+        poses = [rig.read_ahead(frame) if ahead else rig.read() for rig in self.rigs]
         pose = np.zeros((len(self.real), 4, 4))
         for r, rig_pose in enumerate(poses):
             rows = self.rig_of_point == r
@@ -368,7 +381,7 @@ class Runtime:
             s.groups[g].curves = group_curves.curves(props)
             self._frame_forces(g, rig, props, scene)
             s.wind[g] = wind
-            world = rig.obj.matrix_world
+            world = rig.world
             s.world_to_sim[g] = np.linalg.inv(np.array(world.to_3x3()))
             if props.use_scene_gravity:          # the scene's gravity, in world space, scaled
                 gravity = np.array(scene.gravity, dtype=float) * props.gravity_scale
@@ -393,18 +406,59 @@ class Runtime:
 
     def _shapes(self, g, scene):
         """This frame's colliders for a group (colliders.group_colliders), in its armature's space (Kawaii's
-        Update*Limits, once a frame)."""
+        Update*Limits, once a frame). Read ahead of evaluation, a collider on a bone whose pose was rebuilt for
+        this frame (Rig.read_ahead) moves with it; any other is where Blender last evaluated it."""
         rig, props = self._group(g)
+        to_armature = np.linalg.inv(np.array(rig.world))
         shapes = []
         for obj in collider_objects.group_colliders(props, scene):
-            shape = collider_objects.shape_of(obj, rig.obj, self.cm)
+            matrix = to_armature @ self._collider_world(obj)
+            shape = collider_objects.shape_of(obj, rig.obj, self.cm, matrix=matrix)
             if shape is not None:
                 shapes.append(shape)
         return shapes
 
+    def _collider_world(self, obj):
+        """A collider's world matrix this frame: carried by its bone from where Blender last evaluated both,
+        when that bone was rebuilt for this frame; otherwise the collider's last evaluated matrix."""
+        last = np.array(obj.matrix_world)
+        parent = obj.parent
+        if obj.parent_type != "BONE" or parent is None:
+            return last
+        rig = next((r for r in self.rigs if r.uid == parent.session_uid), None)
+        keys = rig.input_keys if rig is not None else None
+        bone = rig.index.get(obj.parent_bone) if rig is not None else None
+        if keys is None or bone is None or bone not in keys.bones or getattr(rig, "evaluated", None) is None:
+            return last
+        world_now, world_then = np.array(rig.world), np.array(rig.evaluated_world)
+        carried = rig.pose[bone] @ np.linalg.inv(rig.evaluated[bone])
+        return world_now @ carried @ np.linalg.inv(world_then) @ last
+
     def scene(self):
         """The scene this runtime simulates, or None once it is gone."""
         return next((scene for scene in bpy.data.scenes if scene.as_pointer() == self.scene_pointer), None)
+
+    def sync_clock(self, scene):
+        """Steps per Second or Fixed Steps changed: the solver's clock follows where it is, so the chains swing
+        on (a rebuild would put them back at the pose). Their velocities are kept: the solver takes velocity as
+        the last step's displacement over the previous step's time, so the displacement is rescaled to the new
+        step time. A bake keeps playing, outdated; live frames are dropped. Returns whether it changed."""
+        key = frame_cache.key(scene)
+        if not self.scene_clock or key == self.cache_key or key[:4] != self.cache_key[:4]:
+            return False                          # unchanged, a bake's own clock, or the frame range/rate moved
+        s, settings = self.system, scene.waifu_physics
+        before = F32(s.dt_old)
+        s.target_framerate = int(settings.target_framerate)
+        s.fixed_substepping = bool(settings.fixed_substepping)
+        after = F32(1.0) / F32(s.target_framerate) if s.fixed_substepping else before
+        if before > 0 and after != before:
+            s.prev[:] = s.loc - (s.loc - s.prev) * (after / before)
+            s.dt_old = after
+        fps = scene.render.fps / scene.render.fps_base
+        self.interpolate = fps > s.target_framerate
+        _outdate(self, "the simulation rate changed")
+        self.cache_key = key
+        return True
 
     def reset(self, scene):
         """Points back at the pose; warm-up steps if a group asks for them."""
@@ -449,7 +503,7 @@ class Runtime:
             s.max_substeps = old_cap
         for g in range(len(self.group_props)):
             rig, _props = self._group(g)
-            location, rotation, scale = rig.obj.matrix_world.decompose()
+            location, rotation, scale = rig.world.decompose()
             self.motions[g].consume(s.consume_fraction, np.array(location) * self.cm,
                                     (rotation.x, rotation.y, rotation.z, rotation.w), tuple(scale))
         self._write()
@@ -545,8 +599,8 @@ class Runtime:
     def keys_changed(self):
         """Keys added to or removed from a chain, or a chain curve muted or unmuted: the curves Waifu Physics
         owns must be found again."""
-        return any(rig.keys is not None and (rig.keys.count(rig) != rig.keys.total or rig.keys.mutes_changed(rig))
-                   for rig in self.rigs)
+        return any((rig.keys is not None and (rig.keys.count(rig) != rig.keys.total or rig.keys.mutes_changed(rig)))
+                   or (rig.input_keys is not None and rig.input_keys.changed()) for rig in self.rigs)
 
 
 def frame_of(scene):
@@ -554,9 +608,13 @@ def frame_of(scene):
 
 
 def _essentials(scene, rt):
-    """The objects the simulation's input depends on: the armatures, what they are parented to,
-    their constraint and driver targets (followed through), colliders and wind fields."""
-    needed, stack = set(), [rig.obj for rig in rt.rigs]
+    """The objects the simulation's input depends on: the armatures, colliders and force fields of every
+    type (the solver reads them all, and a disabled field is not visible, so it would be skipped), with
+    what they are parented to and their constraint and driver targets, followed through."""
+    needed = set()
+    stack = [rig.obj for rig in rt.rigs] + [
+        obj for obj in scene.objects
+        if obj.waifu_physics_collider.is_collider or (obj.field is not None and obj.field.type != "NONE")]
     while stack:
         obj = stack.pop()
         if obj is None or obj.name in needed:
@@ -573,13 +631,6 @@ def _essentials(scene, rt):
             for driver in data.drivers:
                 for variable in driver.driver.variables:
                     stack += [t.id for t in variable.targets if isinstance(t.id, bpy.types.Object)]
-    for obj in scene.objects:
-        if obj.waifu_physics_collider.is_collider or (obj.field is not None and obj.field.type == "WIND"):
-            needed.add(obj.name)
-            parent = obj.parent
-            while parent is not None:
-                needed.add(parent.name)
-                parent = parent.parent
     return needed
 
 
@@ -634,8 +685,10 @@ def scene_wind(scene, cm):
 def runtime(scene, rebuild=False):
     key = scene.as_pointer()
     current = _runtimes.get(key)
-    changed_clock = current is not None and current.cache_key != frame_cache.key(scene)
     stale = current is not None and not current.alive()
+    if current is not None and not (rebuild or stale or key in _dirty or "all" in _dirty):
+        current.sync_clock(scene)
+    changed_clock = current is not None and current.cache_key != frame_cache.key(scene)
     if current is None or rebuild or changed_clock or stale or key in _dirty or "all" in _dirty:
         previous = current
         if previous is not None:
@@ -770,6 +823,8 @@ def _frame_changing(scene, depsgraph=None):
         return
     current.stepped_ahead = None
     dirty = key in _dirty or "all" in _dirty
+    if not dirty and not _building_cache:
+        current.sync_clock(scene)
     frame = scene.frame_current
     cached = settings.use_cache and current.cache_mode == "canonical"
     if not _building_cache and cached:                    # a bake plays even when outdated
@@ -777,8 +832,10 @@ def _frame_changing(scene, depsgraph=None):
         if snapshot is not None:
             snapshot.replay(current)
             return
-    # Playing on: solve now, so Blender evaluates the frame once (the body's input a frame late).
-    if not _building_cache and not dirty and current.fast and current.cache_mode != "canonical" \
+    # Playing on: solve now, so Blender evaluates the frame once (the body's input a frame late). With Fast
+    # Evaluation off, or keys it cannot take over, it solves after evaluation instead and Blender evaluates twice.
+    if not _building_cache and not dirty and current.fast and settings.fast_evaluation \
+            and current.cache_mode != "canonical" \
             and current.cache_key == frame_cache.key(scene) and frame != scene.frame_start:
         last = current.last_frame
         frames = None if last is None else frame - last
