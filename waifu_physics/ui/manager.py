@@ -1026,15 +1026,15 @@ class WAIFU_PHYSICS_OT_group_rename(bpy.types.Operator):
         if not 0 <= self.index < len(obj.waifu_physics.groups) or key in _editing:
             return {"CANCELLED"}
         _editing[key] = Editing(self.index, obj.waifu_physics.groups[self.index].name)
-        self.area = context.area
+        self.area_key = context.area.as_pointer()     # not the area itself: it can be closed while typing
         context.window_manager.modal_handler_add(self)
         context.area.tag_redraw()
         return {"RUNNING_MODAL"}
 
     def _finish(self, context, keep):
-        key = self.area.as_pointer()
+        key = self.area_key
         editing = _editing.pop(key, None)
-        self.area.tag_redraw()
+        _redraw(context, key)
         obj = shown(context)
         name = editing.text.strip() if editing is not None else ""
         if not keep or obj is None or not name or not 0 <= editing.group < len(obj.waifu_physics.groups):
@@ -1043,8 +1043,11 @@ class WAIFU_PHYSICS_OT_group_rename(bpy.types.Operator):
         return True
 
     def modal(self, context, event):
-        editing = _editing.get(self.area.as_pointer())
+        editing = _editing.get(self.area_key)
         if editing is None:
+            return {"CANCELLED"}
+        if not _redraw(context, self.area_key, tag=False):       # its area was closed: drop the edit
+            _editing.pop(self.area_key, None)
             return {"CANCELLED"}
         if event.value != "PRESS":
             return {"RUNNING_MODAL"} if event.type not in ("MOUSEMOVE", "INBETWEEN_MOUSEMOVE", "TIMER") \
@@ -1065,8 +1068,19 @@ class WAIFU_PHYSICS_OT_group_rename(bpy.types.Operator):
         elif event.unicode and not (event.ctrl or event.alt or event.oskey):
             editing.text = event.unicode if editing.selected else editing.text + event.unicode
             editing.selected = False
-        self.area.tag_redraw()
+        _redraw(context, self.area_key)
         return {"RUNNING_MODAL"}
+
+
+def _redraw(context, key, tag=True):
+    """Redraw the area whose pointer is key, found among the open windows' areas. Returns whether it is open."""
+    for window in context.window_manager.windows:
+        for area in window.screen.areas:
+            if area.as_pointer() == key:
+                if tag:
+                    area.tag_redraw()
+                return True
+    return False
 
 
 CLASSES = (WAIFU_PHYSICS_OT_chain_manager, WAIFU_PHYSICS_OT_manager_scroll, WAIFU_PHYSICS_OT_manager_key,

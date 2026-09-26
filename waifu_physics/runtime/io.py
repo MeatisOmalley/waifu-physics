@@ -345,7 +345,7 @@ class Rig:
 
     def refresh_keyed(self):
         keys = self.keys
-        owned = {(c.data_path, c.array_index) for c, *_ in keys.curves} if keys is not None and keys.muted else ()
+        owned = keys.curves.paths if keys is not None and keys.muted else ()
         channels = animated_channels(self.obj, frozenset(owned))
         self.keyed = {kind: np.array([kind in channels.get(name, ()) for name in self.names])
                       for kind in ("location", "rotation", "scale")}

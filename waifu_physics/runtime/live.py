@@ -579,10 +579,15 @@ class Runtime:
                 rig.restore(frame)
 
     def release(self):
-        """Stop simulating: the chains' keys back to Blender, the chains back to their input. A deleted
-        armature is skipped; its keys went with it."""
+        """Stop simulating: the chains' keys back to Blender, the chains back to their input. An armature whose
+        bones changed only gets its keys back (by its record: chain_keys.release_marked); a deleted one is
+        skipped, its keys gone with it."""
         for rig in self.rigs:
             if not rig.alive():
+                try:
+                    chain_keys.release_marked(rig.obj)
+                except (ReferenceError, AttributeError):
+                    pass
                 continue
             try:
                 rig.keys.unmute()
@@ -616,6 +621,14 @@ class Runtime:
         before evaluation, so it must be made again after."""
         return any(np.any(rig.chain & rig.keyed[kind]) and not rig.keys.muted
                    for rig in self.rigs for kind in ("location", "rotation", "scale"))
+
+    def layout_changed(self):
+        """Has an armature's action changed shape since this run was built (keys.HeldCurves.stale)? Checked each
+        frame, since edits made through the API need not reach the depsgraph handler first."""
+        try:
+            return any(rig.keys is not None and rig.keys.curves.stale() for rig in self.rigs)
+        except ReferenceError:
+            return True
 
     def keys_changed(self):
         """Keys added to or removed from a chain, or a chain curve muted or unmuted: the curves Waifu Physics
@@ -842,6 +855,8 @@ def set_simulating(scene, on):
         current = _runtimes.pop(scene.as_pointer(), None)
         if current is not None:
             current.release()
+        # Simulate off leaves no curve muted by Waifu Physics, whatever a lost run (an undo) left behind.
+        chain_keys.recover(scene.objects)
 
 
 @persistent
@@ -857,6 +872,9 @@ def _frame_changing(scene, depsgraph=None):
         return
     current.stepped_ahead = None
     dirty = key in _dirty or "all" in _dirty
+    if not dirty and not _building_cache and current.layout_changed():
+        mark_dirty(scene)                       # curves added or removed, or another action: find them again
+        dirty = True
     if not dirty and not _building_cache:
         current.sync_clock(scene)
     frame = scene.frame_current
@@ -974,6 +992,15 @@ def _depsgraph_updated(scene, depsgraph):
 
 
 @persistent
+def _undone(scene, *_args):
+    """An undo or redo replaced the data the running simulations hold references into: drop them without
+    touching those. The next frame builds again, and hands back whatever curves the restored data has muted
+    (chain_keys.release_marked, when the new run reads its keys)."""
+    _runtimes.clear()
+    _dirty.add("all")
+
+
+@persistent
 def _file_loaded(_file):
     _runtimes.clear()
     _dirty.clear()
@@ -1015,7 +1042,8 @@ def register():
         bpy.app.handlers.depsgraph_update_post.append(_depsgraph_updated)
     if _file_loaded not in bpy.app.handlers.load_pre:
         bpy.app.handlers.load_pre.append(_file_loaded)
-    for handler, name in ((_file_ready, "load_post"), (_saving, "save_pre"), (_saved, "save_post")):
+    for handler, name in ((_file_ready, "load_post"), (_saving, "save_pre"), (_saved, "save_post"),
+                          (_undone, "undo_post"), (_undone, "redo_post")):
         if handler not in getattr(bpy.app.handlers, name):
             getattr(bpy.app.handlers, name).append(handler)
 
@@ -1033,6 +1061,7 @@ def unregister():
         bpy.app.handlers.depsgraph_update_post.remove(_depsgraph_updated)
     while _file_loaded in bpy.app.handlers.load_pre:
         bpy.app.handlers.load_pre.remove(_file_loaded)
-    for handler, name in ((_file_ready, "load_post"), (_saving, "save_pre"), (_saved, "save_post")):
+    for handler, name in ((_file_ready, "load_post"), (_saving, "save_pre"), (_saved, "save_post"),
+                          (_undone, "undo_post"), (_undone, "redo_post")):
         while handler in getattr(bpy.app.handlers, name):
             getattr(bpy.app.handlers, name).remove(handler)

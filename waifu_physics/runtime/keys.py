@@ -50,21 +50,71 @@ def _action_curves(data):
     return found
 
 
+def _layout(obj):
+    """What the object's action curves were found in: the action, its slot, and each channel bag's curve count.
+    If this changes, references to its F-curves may no longer be good."""
+    data = obj.animation_data
+    if data is None or data.action is None or data.action_slot is None:
+        return None
+    slot = data.action_slot
+    return (data.action.as_pointer(), slot.handle,
+            tuple(len(bag.fcurves) for layer in data.action.layers for strip in layer.strips
+                  for bag in [strip.channelbag(slot)] if bag is not None))
+
+
+class HeldCurves:
+    """F-curves of an object's own action, held by what finds them again: (data path, array index). An F-curve is
+    no ID, so no pointer property can hold one, and a Python reference to one outlives it (a deleted channel,
+    another action; an undo drops the whole run). Before each use the action's layout (_layout) is compared with
+    the one the curves were found in; on any change they are found again by path, and any gone are skipped
+    (the depsgraph handler notices the change and rebuilds). Paths are read from here, never from a curve."""
+
+    def __init__(self, obj, entries):
+        """entries: (fcurve, data path, array index, payload); the payload is handed back with each curve."""
+        self.obj = obj
+        self.entries = [(path, index, payload) for _curve, path, index, payload in entries]
+        self.paths = {(path, index) for path, index, _payload in self.entries}
+        self._refs = [curve for curve, *_ in entries]
+        self._layout = self.built = _layout(obj)
+
+    def stale(self):
+        """Has the action's layout changed since the curves were found: curves added or removed, another action
+        or slot? Then what was worked out from them (which to take over, sample, or leave) must be again."""
+        return _layout(self.obj) != self.built
+
+    def __len__(self):
+        return len(self.entries)
+
+    def resolved(self):
+        """[(fcurve, payload)] for the curves as they are now."""
+        now = _layout(self.obj)
+        if now != self._layout:
+            data = self.obj.animation_data
+            found = {(c.data_path, c.array_index): c for c in _action_curves(data)} if data is not None else {}
+            self._refs = [found.get((path, index)) for path, index, _payload in self.entries]
+            self._layout = now
+        return [(curve, payload) for curve, (_p, _i, payload) in zip(self._refs, self.entries) if curve is not None]
+
+
 class ChainKeys:
     """The chain bones' keyframe curves of one rig, which Waifu Physics samples while it owns them."""
 
     def __init__(self, rig):
         obj = rig.obj
         self.obj = obj
-        self.curves = []                   # (fcurve, bone index, channel, array index)
+        self.curves = HeldCurves(obj, [])    # the chain curves taken over; payload (bone index, channel, index)
         self.ownable = True
         self.muted = False
         self.total = 0                     # chain curves in the action, muted or not: notices new keys
         self.user_muted = set()            # chain curves the user muted: left alone, and their channels at rest
+        # Curves a previous run muted and never handed back (its references went stale: an undo, a changed
+        # armature) would look muted by the user, and never be unmuted again: hand them back first.
+        release_marked(obj)
         data = obj.animation_data
         if data is None:
             return
         chain = {rig.names[i] for i in np.flatnonzero(rig.chain)}
+        owned = []
         for curve in _action_curves(data):
             found = _bone_path(curve.data_path)
             if found and found[0] in chain:
@@ -72,7 +122,9 @@ class ChainKeys:
                 if curve.mute:
                     self.user_muted.add((curve.data_path, curve.array_index))
                 else:
-                    self.curves.append((curve, rig.index[found[0]], found[1], curve.array_index))
+                    owned.append((curve, curve.data_path, curve.array_index,
+                                  (rig.index[found[0]], found[1], curve.array_index)))
+        self.curves = HeldCurves(obj, owned)
         # Animation Waifu Physics cannot take over: NLA strips and drivers on chain channels, or an
         # action that does not simply replace.
         foreign = []
@@ -90,7 +142,7 @@ class ChainKeys:
         foreign += [d.data_path for d in data.drivers]
         if any(_bone_path(p) and _bone_path(p)[0] in chain for p in foreign):
             self.ownable = False
-        if self.curves and (data.action_influence < 1.0 or data.action_blend_type != "REPLACE"):
+        if len(self.curves) and (data.action_influence < 1.0 or data.action_blend_type != "REPLACE"):
             self.ownable = False
 
     def count(self, rig):
@@ -110,7 +162,7 @@ class ChainKeys:
         if data is None:
             return bool(self.user_muted)
         chain = {rig.names[i] for i in np.flatnonzero(rig.chain)}
-        owned = {(c.data_path, c.array_index) for c, *_ in self.curves} if self.muted else set()
+        owned = self.curves.paths if self.muted else set()
         user_muted, owned_unmuted = set(), False
         for curve in _action_curves(data):
             found = _bone_path(curve.data_path)
@@ -125,31 +177,29 @@ class ChainKeys:
 
     def mute(self):
         """Take the chain curves over. Only curves not already muted are touched."""
-        if not self.ownable or not self.curves or self.muted:
+        if not self.ownable or not len(self.curves) or self.muted:
             return
-        for curve, *_ in self.curves:
+        # The record comes first, and holds every curve muted: it, not the references kept here, is what hands
+        # the curves back (release_marked), so a stale reference can never leave one muted.
+        marked = set(_marked(self.obj)) | self.curves.paths
+        self.obj[MARK] = json.dumps(sorted(marked))
+        for curve, _payload in self.curves.resolved():
             curve.mute = True
-        self.obj[MARK] = json.dumps([(c.data_path, c.array_index) for c, *_ in self.curves])
         self.muted = True
 
     def unmute(self):
+        """Hand the curves back: every one the armature's record names, found again by path."""
         if not self.muted:
             return
-        for curve, *_ in self.curves:
-            try:
-                curve.mute = False
-            except ReferenceError:
-                pass
         try:
-            if MARK in self.obj:
-                del self.obj[MARK]
-        except ReferenceError:
+            release_marked(self.obj)
+        except ReferenceError:              # the armature is gone, and its curves with it
             pass
         self.muted = False
 
     def sample(self, frame, buffers):
         """Write the sampled keyframe values at frame into per-bone channel buffers."""
-        for curve, bone, channel, index in self.curves:
+        for curve, (bone, channel, index) in self.curves.resolved():
             buffers[channel][bone * CHANNELS[channel] + index] = curve.evaluate(frame)
 
 
@@ -185,10 +235,6 @@ class InputKeys:
 
     def __init__(self, rig, wanted):
         obj = rig.obj
-        self.data = obj.animation_data
-        self.action = self.data.action if self.data is not None else None
-        self.curves = []                   # (fcurve, bone index, channel, array index)
-        self.object_curves = []            # (fcurve, channel, array index)
         blocked = set()
         for i, pb in enumerate(obj.pose.bones):
             for c in pb.constraints:
@@ -201,7 +247,7 @@ class InputKeys:
                     while bone is not None and (reach == 0 or depth < reach):
                         blocked.add(rig.index[bone.name])
                         bone, depth = bone.parent, depth + 1
-        data = self.data
+        data = obj.animation_data
         foreign = _foreign_paths(data) if data is not None else []
         blocked |= {rig.index[found[0]] for found in map(_bone_path, foreign) if found and found[0] in rig.index}
         whole = data is None or (data.action_influence >= 1.0 and data.action_blend_type == "REPLACE")
@@ -217,10 +263,13 @@ class InputKeys:
         self.bones = np.array(sorted(i for i in wanted if ok[i]), dtype=int)
         self.complete = len(self.bones) == len(wanted)        # every bone asked for can be sampled
         chosen = {rig.names[i] for i in self.bones}
+        sampled = []
         for curve in own:
             found = _bone_path(curve.data_path)
             if found and found[0] in chosen and not curve.mute:
-                self.curves.append((curve, rig.index[found[0]], found[1], curve.array_index))
+                sampled.append((curve, curve.data_path, curve.array_index,
+                                (rig.index[found[0]], found[1], curve.array_index)))
+        self.curves = HeldCurves(obj, sampled)
         self.object_ok = (whole and obj.parent is None
                           and not any(c.enabled and c.influence > 0 for c in obj.constraints)
                           and not any(p in OBJECT_CHANNELS or p in OBJECT_BLOCKERS for p in foreign)
@@ -228,17 +277,18 @@ class InputKeys:
                           and tuple(obj.delta_location) == (0, 0, 0) and tuple(obj.delta_scale) == (1, 1, 1)
                           and tuple(obj.delta_rotation_euler) == (0, 0, 0)
                           and tuple(obj.delta_rotation_quaternion) == (1, 0, 0, 0))
-        if self.object_ok:
-            self.object_curves = [(c, c.data_path, c.array_index) for c in own
-                                  if c.data_path in OBJECT_CHANNELS and not c.mute]
+        self.object_curves = HeldCurves(obj, [(c, c.data_path, c.array_index, (c.data_path, c.array_index))
+                                              for c in own if self.object_ok and c.data_path in OBJECT_CHANNELS
+                                              and not c.mute])
         self.rig = rig
         self.total = self._count()
 
     def _count(self):
         """What the sampling was worked out from: the action and its curves (with their mute flags), and what
         decides which bones and whether the object can be sampled -- constraints, drivers, NLA, parent."""
-        data, obj = self.data, self.rig.obj
+        obj = self.rig.obj
         try:
+            data = obj.animation_data
             curves = _action_curves(data) if data is not None else []
             return (data.action if data is not None else None, len(curves), tuple(c.mute for c in curves),
                     tuple((c.type, c.enabled, c.influence > 0) for pb in obj.pose.bones for c in pb.constraints),
@@ -255,7 +305,7 @@ class InputKeys:
 
     def sample(self, frame, buffers):
         """This frame's keyed values into the bones' channel buffers."""
-        for curve, bone, channel, index in self.curves:
+        for curve, (bone, channel, index) in self.curves.resolved():
             buffers[channel][bone * CHANNELS[channel] + index] = curve.evaluate(frame)
 
     def world(self, obj, frame):
@@ -264,7 +314,7 @@ class InputKeys:
             return None
         from mathutils import Euler, Matrix, Quaternion, Vector
         values = {path: list(getattr(obj, path)) for path in OBJECT_CHANNELS}
-        for curve, path, index in self.object_curves:
+        for curve, (path, index) in self.object_curves.resolved():
             values[path][index] = curve.evaluate(frame)
         mode = obj.rotation_mode
         if mode == "QUATERNION":
@@ -277,19 +327,33 @@ class InputKeys:
         return Matrix.LocRotScale(Vector(values["location"]), rotation, Vector(values["scale"]))
 
 
+def _marked(obj):
+    """(data path, index) of the curves Waifu Physics muted on this object, from its record."""
+    found = []
+    for mark in (MARK, LEGACY_MARK):
+        if mark in obj.keys():
+            try:
+                found += [tuple(entry) for entry in json.loads(obj[mark])]
+            except (TypeError, ValueError):
+                pass
+    return found
+
+
+def release_marked(obj):
+    """Unmute the curves the object's record says Waifu Physics muted, found by path in its action, and forget
+    them. Safe whatever Python references went stale, since it looks the curves up now."""
+    wanted = set(_marked(obj))
+    data = obj.animation_data
+    if wanted and data is not None:
+        for curve in _action_curves(data):
+            if (curve.data_path, curve.array_index) in wanted:
+                curve.mute = False
+    for mark in (MARK, LEGACY_MARK):
+        if mark in obj.keys():
+            del obj[mark]
+
+
 def recover(objects):
     """Unmute curves a previous session left muted (it ended while simulating)."""
     for obj in objects:
-        for mark in (MARK, LEGACY_MARK):
-            if mark not in obj.keys():
-                continue
-            try:
-                wanted = {tuple(entry) for entry in json.loads(obj[mark])}
-            except (TypeError, ValueError):
-                wanted = set()
-            data = obj.animation_data
-            if data is not None:
-                for curve in _action_curves(data):
-                    if (curve.data_path, curve.array_index) in wanted:
-                        curve.mute = False
-            del obj[mark]
+        release_marked(obj)

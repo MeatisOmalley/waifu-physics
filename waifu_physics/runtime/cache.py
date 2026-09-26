@@ -157,8 +157,7 @@ def collider_prints(rt):
 
 def action_print(rt, action):
     """What an action's curves say: keys and mute flags, but not the flags of curves Waifu Physics owns."""
-    owned = {(c.data_path, c.array_index) for rig in rt.rigs if rig.keys is not None and rig.keys.muted
-             for c, *_ in rig.keys.curves}
+    owned = {path for rig in rt.rigs if rig.keys is not None and rig.keys.muted for path in rig.keys.curves.paths}
     parts = []
     for layer in action.layers:
         for strip in layer.strips:
