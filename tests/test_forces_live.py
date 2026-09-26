@@ -46,7 +46,6 @@ def build(with_thigh=False):
         pb.select = pb.name == "s0"
     bpy.ops.waifu_physics.group_new()
     group = rig.waifu_physics.groups[0]
-    group.dummy_bone_length = 0.05
     bpy.ops.object.mode_set(mode="OBJECT")
     return rig, group
 

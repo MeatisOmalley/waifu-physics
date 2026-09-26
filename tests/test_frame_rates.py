@@ -36,7 +36,6 @@ def make_rig(fps, keyed_child=False):
     bpy.ops.object.mode_set(mode="OBJECT")
     group = rig.waifu_physics.groups.add()
     group.roots.add().name = "child"
-    group.dummy_bone_length = 0.1
     group.damping = 0.1
     anchor_pose = rig.pose.bones["anchor"]
     anchor_pose.rotation_mode = "XYZ"

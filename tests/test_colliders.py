@@ -100,7 +100,6 @@ check("a capsule lies along its bone: Kawaii's capsule axis is the bone's Y", np
 bpy.data.objects.remove(col)
 g = rig.waifu_physics.groups.add()
 g.roots.add().name = "c0"
-g.dummy_bone_length = 0.1
 g.radius = 0.02
 g.damping = 0.1
 floor = colliders.add(rig, "anchor", "Capsule")

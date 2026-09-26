@@ -57,7 +57,6 @@ group.links[1].compliance = "FAT"
 group.links[2].exclude_from_subdivision = True
 group.damping, group.stiffness, group.radius = 0.23, 0.07, 0.025
 group.gravity = (0.5, 0.0, -1.0)
-group.dummy_bone_length = 0.04
 group.bridge_count = 1
 group.collider_sets.add().armature = source
 group.collider_sets.add().armature = body
@@ -78,6 +77,10 @@ colliders.add(body, "p0_0", "Sphere")
 bpy.context.view_layer.update()
 
 data = serialize.armature_to_dict(source, scene)
+exported_tips = data["groups"][0]["tips"]
+leaves = {name: source.data.bones[name].length for name in exported_tips}
+check("a setup lists each chain's tip, its last bone's length (Kawaii's DummyBoneLength, per chain)",
+      exported_tips and exported_tips == leaves, exported_tips)
 text = json.dumps(data)
 check("a setup is plain JSON", isinstance(text, str) and json.loads(text) == data)
 check("it names the Kawaii Physics it follows", data["kawaii_commit"].startswith("64cbc77"))

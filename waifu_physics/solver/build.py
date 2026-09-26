@@ -24,12 +24,15 @@ class Skeleton:
 
     ref_length: each bone's rest offset from its parent (the reference pose's local
     translation), whose size is Kawaii's BoneLength. pose / rotation: the current
-    pose in simulation space, which is where points start."""
+    pose in simulation space, which is where points start. tip_length: how far past each bone a
+    chain ending there puts its tip point, where the skeleton knows (a Blender bone's own length);
+    None uses each group's dummy_bone_length, as Kawaii does, whose bones are joints with no length."""
     names: list
     parents: list
     ref_length: list
     pose: np.ndarray                 # (bones, 3), centimetres
     rotation: np.ndarray             # (bones, 4), x y z w
+    tip_length: list = None          # (bones,), centimetres
 
     def children(self, index):
         """CollectChildBones: every bone whose parent this is, in skeleton order."""
@@ -48,7 +51,7 @@ class GroupSpec:
 class _Node:
     """One Kawaii ModifyBone while building."""
     __slots__ = ("kind", "bone", "parent", "children", "loc", "rot", "real_parent", "real_child", "alpha",
-                 "bone_length", "length_from_root", "length_rate", "group")
+                 "bone_length", "length_from_root", "length_rate", "group", "tip_length")
 
     def __init__(self, kind, bone, loc, rot, group):
         self.kind, self.bone, self.loc, self.rot, self.group = kind, bone, np.asarray(loc, F64), \
@@ -57,6 +60,7 @@ class _Node:
         self.real_parent = self.real_child = -1
         self.alpha = F32(0.0)
         self.bone_length = self.length_from_root = self.length_rate = F32(0.0)
+        self.tip_length = F32(0.0)                    # a tip's distance past its real bone
 
 
 def _size(v):
@@ -126,12 +130,13 @@ def _add_bone(nodes, skeleton, spec, bone, excluded, group):
                 if d == len(nodes) - 1:
                     nodes.pop()
             nodes[index].children = [c for c in nodes[index].children if c not in inserted]
-    if not added and grp.dummy_bone_length > 0:
+    length = F32(grp.dummy_bone_length if skeleton.tip_length is None else skeleton.tip_length[bone])
+    if not added and length > 0:
         forward = ue.axis(node.rot[None], System.forward_axis)[0]
-        length = F32(grp.dummy_bone_length)
         tip = node.loc + forward * F64(length)
         effective, inserted = _inter_dummies(nodes, grp, index, index, tip, node.rot, length, group)
         dummy = _Node(KIND_TIP, -1, tip, node.rot, group)
+        dummy.tip_length = length
         if inserted:
             dummy.real_parent = index
             dummy.bone_length = F32(length / F32(len(inserted) + 1))
@@ -157,7 +162,7 @@ def _lengths(nodes, skeleton, grp, root):
             if node.kind == KIND_BONE:
                 node.bone_length = F32(skeleton.ref_length[node.bone])
             elif node.kind == KIND_TIP and nodes[node.parent].kind != KIND_INTER:
-                node.bone_length = F32(grp.dummy_bone_length)
+                node.bone_length = F32(node.tip_length)
             node.length_from_root = F32(nodes[node.parent].length_from_root + node.bone_length)
             total[0] = max(total[0], node.length_from_root)
         for child in node.children:
@@ -201,7 +206,7 @@ def build(skeleton, specs, target_framerate=60, max_substeps=4, fixed_substeppin
         location=[n.loc for n in all_nodes], pose=[n.loc for n in all_nodes],
         pose_rotation=[n.rot for n in all_nodes], length_rate=[n.length_rate for n in all_nodes],
         bone=[n.bone for n in all_nodes], bone_length=[n.bone_length for n in all_nodes],
-        length_from_root=[n.length_from_root for n in all_nodes])
+        length_from_root=[n.length_from_root for n in all_nodes], tip_length=[n.tip_length for n in all_nodes])
     link_arrays = dict(a=[l[0] for l in links], b=[l[1] for l in links], length=[l[2] for l in links],
                        compliance_type=[l[3] for l in links])
     system = System(groups, points, link_arrays, target_framerate, max_substeps, fixed_substepping)

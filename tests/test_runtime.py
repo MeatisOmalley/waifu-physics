@@ -40,7 +40,6 @@ def armature(name, direction=(1.0, 0.0, 0.0), count=3, length=0.2):
 def group(obj, **values):
     g = obj.waifu_physics.groups.add()
     g.roots.add().name = "c0"
-    g.dummy_bone_length = 0.1
     for key, value in values.items():
         setattr(g, key, value)
     return g
@@ -340,6 +339,55 @@ check("changing a chain bone's Inherit Scale rebuilds the rig it was read into",
           live.runtime(scene).rigs[0].index["strand2"]] == io.FULL)
 scene.waifu_physics.simulate = False
 io.Rig.write = plain_write
+
+# --- a chain's tip point is its last bone's tail, per chain: Blender knows each bone's length (Kawaii's
+# DummyBoneLength is only its stand-in), so the last bone swings like the others
+reset_scene()
+rig = armature("tips", direction=(0.0, 0.0, -1.0))
+bpy.context.view_layer.objects.active = rig
+bpy.ops.object.mode_set(mode="EDIT")
+rig.data.edit_bones["c2"].tail = rig.data.edit_bones["c2"].head + Vector((0.0, 0.0, -0.35))   # a longer last bone
+second = rig.data.edit_bones.new("d0")
+second.head, second.tail = (0.3, 0.0, 2.0), (0.3, 0.0, 1.9)
+second.parent = rig.data.edit_bones["anchor"]
+bpy.ops.object.mode_set(mode="OBJECT")
+g = group(rig)
+g.roots.add().name = "d0"
+scene.frame_set(1)
+scene.waifu_physics.simulate = True
+rt = live.runtime(scene)
+s = rt.system
+KIND_TIP = sys.modules["waifu_physics.solver.system"].KIND_TIP
+tips = np.flatnonzero(s.kind == KIND_TIP)
+tails = {name: np.array(rig.data.bones[name].tail_local) for name in ("c2", "d0")}
+found = {s.bone_names[s.parent[i]]: s.loc[i] / rt.cm for i in tips}
+check("each chain's tip point sits on its own last bone's tail (35 cm on one chain, 10 cm on the other)",
+      set(found) == {"c2", "d0"} and all(np.allclose(found[n], tails[n], atol=1e-5) for n in found),
+      {n: (found[n], tails[n]) for n in found})
+anchor_bone = rig.pose.bones["anchor"]
+anchor_bone.rotation_mode = "XYZ"
+for frame, turn in ((1, 0.0), (8, 1.2), (20, 1.2)):
+    anchor_bone.rotation_euler = (0.0, turn, 0.0)
+    anchor_bone.keyframe_insert("rotation_euler", frame=frame)
+scene.waifu_physics.simulate = False
+scene.frame_set(1)
+scene.waifu_physics.simulate = True
+play(2, 10)
+last = rig.pose.bones["c2"].matrix.to_3x3().col[1].normalized()
+before = rig.pose.bones["c1"].matrix.to_3x3().col[1].normalized()
+check("... so the last bone swings with the chain instead of keeping its animated rotation",
+      last.angle(before) > 0.02 or last.angle(anchor_bone.matrix.to_3x3().col[1]) > 0.02, last.angle(before))
+bpy.context.view_layer.objects.active = rig
+bpy.ops.object.mode_set(mode="EDIT")
+rig.data.edit_bones["d0"].tail = (0.3, 0.0, 1.7)
+bpy.ops.object.mode_set(mode="OBJECT")
+bpy.context.view_layer.update()
+scene.frame_set(11)
+rt = live.runtime(scene)
+d0_tip = next(i for i in np.flatnonzero(rt.system.kind == KIND_TIP) if rt.system.bone_names[rt.system.parent[i]] == "d0")
+check("lengthening a bone rebuilds the simulation, its tip moving to the new tail",
+      rt.system.tip_length[d0_tip] / rt.cm > 0.29, rt.system.tip_length[d0_tip] / rt.cm)
+scene.waifu_physics.simulate = False
 
 addon.unregister()
 check("unregistering removes the frame handler", live._frame_changed not in bpy.app.handlers.frame_change_post)

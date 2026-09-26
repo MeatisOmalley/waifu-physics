@@ -235,6 +235,9 @@ class Rig:
         parent_rest = np.where((self.parents >= 0)[:, None, None], rest[np.maximum(self.parents, 0)], np.eye(4))
         self.parent_rest = parent_rest
         self.rest_rel = np.linalg.inv(parent_rest) @ rest              # rest offset from the parent
+        # Each bone's own rest length, head to tail: where a chain ending there puts its tip point (Kawaii's
+        # DummyBoneLength, which Kawaii must be told: its bones are joints with no tail).
+        self.lengths = np.array([pb.bone.length for pb in bones])
         self.inheritance = self._inheritance()
         flags = np.array(self.inheritance, dtype=int).reshape(-1, 3)
         self.inherit_scale, self.hinge, self.no_local_location = flags[:, 0], flags[:, 1] == 1, flags[:, 2] == 1
@@ -276,6 +279,15 @@ class Rig:
     def same_inheritance(self):
         """The bones still take their parents' pose the way this rig was built for."""
         return self.alive() and self._inheritance() == self.inheritance
+
+    def same_rest(self):
+        """The bones' rest positions and lengths are the ones this rig was built from (not edited since)."""
+        if not self.alive():
+            return False
+        bones = self.obj.pose.bones
+        rest = np.array([np.array(pb.bone.matrix_local) for pb in bones]).reshape(self.count, 4, 4)
+        lengths = np.array([pb.bone.length for pb in bones])
+        return np.allclose(rest, self.rest, atol=1e-6) and np.allclose(lengths, self.lengths, atol=1e-6)
 
     def same_bones(self):
         """Bones by the same names in the same order: renames too mean rebuilding."""

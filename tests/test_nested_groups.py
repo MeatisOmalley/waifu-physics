@@ -85,7 +85,6 @@ def run(with_lower):
     obj = chain("run")
     upper = new_group(obj, {"c0", "c1", "c2"})
     upper.stiffness = 0.0
-    upper.dummy_bone_length = 0.1              # the upper half's last bone turns with the chain (a tip to aim at)
     if with_lower:
         lower = new_group(obj, {"c3", "c4", "c5"})
         lower.stiffness = 1.0                  # held exactly at its pose: its input, carried by the upper half

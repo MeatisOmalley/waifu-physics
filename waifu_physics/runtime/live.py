@@ -102,7 +102,7 @@ class Runtime:
         self.cm = io.cm_per_unit(scene)
         self.rigs = [io.Rig(obj) for obj in armatures(scene)]
         self.group_props = []          # (rig index, group index in obj.waifu_physics.groups)
-        names, parents, ref_length, pose, rotation = [], [], [], [], []
+        names, parents, ref_length, pose, rotation, tip_length = [], [], [], [], [], []
         offsets = []
         for rig in self.rigs:
             groups = [props for props in rig.obj.waifu_physics.groups if props.enabled and len(props.roots)]
@@ -119,6 +119,7 @@ class Runtime:
             names += [f"{r}|{name}" for name in rig.names]
             parents += [p + offsets[-1] if p >= 0 else -1 for p in rig.parents]
             ref_length += list(rig.ref_lengths() * self.cm)
+            tip_length += list(rig.lengths * self.cm)
             pose.append(input_pose[:, :3, 3] * self.cm)
             rotation.append(io.quats_from_matrices(io.unscaled(input_pose[:, :3, :3])))
         self.offsets = offsets
@@ -132,7 +133,7 @@ class Runtime:
         scene_settings = scene.waifu_physics
         self.system = build(Skeleton(names, parents, ref_length,
                                      np.concatenate(pose) if pose else np.zeros((0, 3)),
-                                     np.concatenate(rotation) if rotation else np.zeros((0, 4))),
+                                     np.concatenate(rotation) if rotation else np.zeros((0, 4)), tip_length),
                             specs, target_framerate=target_framerate or scene_settings.target_framerate,
                             fixed_substepping=scene_settings.fixed_substepping)
         s = self.system
@@ -155,13 +156,16 @@ class Runtime:
         # hang from and those the groups' colliders hang from (Rig.prepare_input).
         on_bones = {rig.uid: set() for rig in self.rigs}
         for g in range(len(self.group_props)):
-            for obj in collider_objects.group_colliders(self._group(g)[1], scene):
+            rig, props = self._group(g)
+            on_bones[rig.uid] |= {rig.index[sync.bone] for sync in props.sync_bones if sync.bone in rig.index}
+            for obj in collider_objects.group_colliders(props, scene):
                 if obj.parent_type == "BONE" and obj.parent is not None and obj.parent.session_uid in on_bones:
                     rig = next(x for x in self.rigs if x.uid == obj.parent.session_uid)
                     if obj.parent_bone in rig.index:
                         on_bones[rig.uid].add(rig.index[obj.parent_bone])
         for rig in self.rigs:
             rig.prepare_input(on_bones[rig.uid])
+        self.exact_ahead = self._exact_ahead(scene)
         # Force filters and sync targets name bones; the points of each group by bone name.
         for i in self.real:
             s.bone_names[i] = names[s.bone[i]].split("|", 1)[1]
@@ -177,6 +181,24 @@ class Runtime:
         self.outdated = None              # why a bake no longer matches the scene, or None
         self.own_update = False           # the next depsgraph update is our own write
         self.collider_prints = {}
+
+    def _exact_ahead(self, scene):
+        """Can the one-evaluation path read this frame's whole input before Blender evaluates it? Every bone the
+        solver reads, and each armature, sampled from keys (Rig.prepare_input), no constrained chain bone, each
+        collider on a sampled bone or still, and every force field still. Then solving ahead is exact, and
+        live playback takes it whether or not Fast Evaluation asks for it."""
+        for rig in self.rigs:
+            keys = rig.input_keys
+            if not (keys.complete and keys.object_ok) or np.any(rig.constrained & rig.chain):
+                return False
+        sampled = {(rig.uid, rig.names[i]) for rig in self.rigs for i in rig.input_keys.bones}
+        for g in range(len(self.group_props)):
+            for obj in collider_objects.group_colliders(self._group(g)[1], scene):
+                on_sampled = (obj.parent_type == "BONE" and obj.parent is not None
+                              and (obj.parent.session_uid, obj.parent_bone) in sampled)
+                if not _still(obj, parent=not on_sampled):
+                    return False
+        return all(_still(obj) for obj in scene.objects if obj.field is not None and obj.field.type != "NONE")
 
     def _find_tiers(self):
         """Groups that start partway down another group's chain, as a second Kawaii node on the chain does.
@@ -246,7 +268,6 @@ class Runtime:
         cm = self.cm
         group = Group(
             settings=self._settings(props), curves=group_curves.curves(props),
-            dummy_bone_length=props.dummy_bone_length * cm,
             bone_subdivision_count=props.bone_subdivision_count,
             bone_subdivision_collision_only=props.bone_subdivision_collision_only,
             bone_subdivision_densify_by_radius=props.bone_subdivision_densify_by_radius,
@@ -603,6 +624,19 @@ class Runtime:
                    or (rig.input_keys is not None and rig.input_keys.changed()) for rig in self.rigs)
 
 
+def _still(obj, parent=True):
+    """Does nothing move the object between frames: no animation, drivers or constraints of its own, and (with
+    parent) no parent that moves? A parent bone of an armature counts as moving."""
+    data = obj.animation_data
+    if data is not None and (data.action is not None or len(data.drivers) or len(data.nla_tracks)):
+        return False
+    if any(c.enabled and c.influence > 0 for c in obj.constraints):
+        return False
+    if not parent or obj.parent is None:
+        return True
+    return obj.parent_type == "OBJECT" and _still(obj.parent)
+
+
 def frame_of(scene):
     return scene.frame_current + scene.frame_subframe
 
@@ -834,7 +868,7 @@ def _frame_changing(scene, depsgraph=None):
             return
     # Playing on: solve now, so Blender evaluates the frame once (the body's input a frame late). With Fast
     # Evaluation off, or keys it cannot take over, it solves after evaluation instead and Blender evaluates twice.
-    if not _building_cache and not dirty and current.fast and settings.fast_evaluation \
+    if not _building_cache and not dirty and current.fast and (settings.fast_evaluation or current.exact_ahead) \
             and current.cache_mode != "canonical" \
             and current.cache_key == frame_cache.key(scene) and frame != scene.frame_start:
         last = current.last_frame
@@ -908,8 +942,10 @@ def _armature_changes(scene, depsgraph):
         return
     if not all(rig.same_bones() for rig in current.rigs):
         mark_dirty(scene)
-    elif depsgraph.id_type_updated("ARMATURE") and not all(rig.same_inheritance() for rig in current.rigs):
-        mark_dirty(scene)                      # a bone's Inherit Scale, Inherit Rotation or Local Location
+    elif depsgraph.id_type_updated("ARMATURE") and not all(rig.same_inheritance() and rig.same_rest()
+                                                           for rig in current.rigs):
+        mark_dirty(scene)                      # a bone's Inherit Scale, Inherit Rotation or Local Location, or
+                                               # its rest position or length (a chain's tip is at its last tail)
     elif depsgraph.id_type_updated("COLLECTION") or depsgraph.id_type_updated("SCENE") \
             or depsgraph.id_type_updated("OBJECT"):
         if [obj.session_uid for obj in armatures(scene)] != [rig.uid for rig in current.rigs]:

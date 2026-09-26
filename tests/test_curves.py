@@ -80,7 +80,6 @@ groups = []
 for chain in range(2):
     g = obj.waifu_physics.groups.add()
     g.roots.add().name = f"c{chain}_0"
-    g.dummy_bone_length = 0.1
     groups.append(g)
 g = groups[0]
 g.use_radius_curve = True

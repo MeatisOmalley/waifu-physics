@@ -73,6 +73,7 @@ class Snapshot:
         if fraction >= 1.0:
             return later
         result = copy.copy(later)
+        result.loc = earlier.loc + (later.loc - earlier.loc) * fraction      # drawn as the chains are shown
         result.channels = []
         for rig, a, b in zip(rt.rigs, earlier.channels, later.channels):
             rows = np.flatnonzero(rig.chain)

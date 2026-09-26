@@ -40,7 +40,6 @@ def skirt(name):
     group = obj.waifu_physics.groups.add()
     for k in range(PANELS):
         group.roots.add().name = f"panel{k}_0"
-    group.dummy_bone_length = 0.05
     return obj, group
 
 

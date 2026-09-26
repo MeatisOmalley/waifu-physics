@@ -289,6 +289,15 @@ class WAIFU_PHYSICS_PT_advanced(bpy.types.Panel):
         live_playback = layout.column(heading="Live Playback")
         live_playback.prop(settings, "fixed_substepping")
         live_playback.prop(settings, "fast_evaluation")
+        current = live._runtimes.get(context.scene.as_pointer()) if settings.simulate else None
+        if current is not None and getattr(current, "system", None) is not None:
+            once = current.fast and (settings.fast_evaluation or current.exact_ahead)
+            if once and current.exact_ahead:
+                _caption(layout, "Playback evaluates once a frame.", "Its input is exact.")
+            elif once:
+                _caption(layout, "Playback evaluates once a frame.", "Its input is a frame late.")
+            else:
+                _caption(layout, "Playback evaluates twice a frame,", "so its input is exact.")
         if _GroupPanel.poll(context):
             group_settings = layout.column()
             group_settings.enabled = not live.is_cached(context.scene)
@@ -298,7 +307,6 @@ class WAIFU_PHYSICS_PT_advanced(bpy.types.Panel):
     @staticmethod
     def draw_group(layout, group):
         layout.label(text="Chain Shape")
-        layout.prop(group, "dummy_bone_length")
         layout.prop(group, "bone_subdivision_count")
         sub = layout.column()
         sub.active = group.bone_subdivision_count > 0

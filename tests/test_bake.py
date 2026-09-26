@@ -35,7 +35,6 @@ for frame, x in ((1, 0.0), (30, 0.3)):                  # the armature's own ani
 original = rig.animation_data.action
 group = rig.waifu_physics.groups.add()
 group.roots.add().name = "c0"
-group.dummy_bone_length = 0.1
 group.damping = 0.05
 
 

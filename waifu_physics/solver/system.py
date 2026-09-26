@@ -119,6 +119,9 @@ class System:
         self.bone_length = np.asarray(points.get("bone_length", [0.0] * n), dtype=F32)[order]
         self.length_from_root = np.asarray(points.get("length_from_root", [0.0] * n), dtype=F32)[order]
         self.bone = np.asarray(points.get("bone", [-1] * n), dtype=I32)[order]
+        # Each tip's distance past its real bone; without one, the group's DummyBoneLength, as in Kawaii.
+        tips = points.get("tip_length") or [groups[g].dummy_bone_length for g in points["group"]]
+        self.tip_length = np.asarray(tips, dtype=F32)[order]
         self.loc = np.ascontiguousarray(np.asarray(points["location"], dtype=F64).reshape(n, 3)[order])
         self.prev = self.loc.copy()
         self.pose = np.ascontiguousarray(np.asarray(points["pose"], dtype=F64).reshape(n, 3)[order])
@@ -358,8 +361,7 @@ class System:
         if len(tips):
             ancestor = np.where(self.real_parent[tips] >= 0, self.real_parent[tips], self.parent[tips])
             forward = ue.axis(rot[ancestor], self.forward_axis)
-            length = np.array([self.groups[g].dummy_bone_length for g in self.group[tips]], dtype=F32)
-            pose[tips] = pose[ancestor] + forward * length.astype(F64)[:, None]
+            pose[tips] = pose[ancestor] + forward * self.tip_length[tips].astype(F64)[:, None]
             rot[tips] = rot[ancestor]
             self.frame_pose_scale[tips] = self.frame_pose_scale[ancestor]
         inter = np.flatnonzero(self.kind == KIND_INTER)

@@ -20,19 +20,26 @@ _CIRCLE = [(math.cos(2 * math.pi * k / SEGMENTS), math.sin(2 * math.pi * k / SEG
 
 def _simulated_spheres(scene):
     """(world position, world radius, group colour) of every simulated point, from the running simulation: what
-    collides, where it is now. None when nothing simulates."""
+    collides, where it is now. A cache plays its frames as bone channels only, so then the points are the
+    shown frame's, as cached. None when nothing simulates, or a cache has no frame here (the pose shows)."""
     from ..runtime import live
     rt = live._runtimes.get(scene.as_pointer())
     if rt is None or getattr(rt, "system", None) is None:
         return None
     s = rt.system
+    points = s.loc
+    if live.is_cached(scene):
+        snapshot = rt.cache.get(scene.frame_current)
+        if snapshot is None or len(snapshot.loc) != len(points):
+            return None                          # uncached frame, or a bake made for other chains
+        points = snapshot.loc
     found = []
     try:
         worlds = [rig.obj.matrix_world for rig in rt.rigs]
         for i in np.flatnonzero(s.parent >= 0):
             rig, index = rt.group_props[s.group[i]]
             world = worlds[rig]
-            found.append((world @ Vector(s.loc[i] / rt.cm), float(s.radius[i]) / rt.cm * max(world.to_scale()),
+            found.append((world @ Vector(points[i] / rt.cm), float(s.radius[i]) / rt.cm * max(world.to_scale()),
                           COLOURS[index % len(COLOURS)]))
     except (ReferenceError, IndexError, AttributeError):
         return None

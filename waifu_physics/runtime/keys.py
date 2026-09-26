@@ -213,7 +213,9 @@ class InputKeys:
         for i in range(rig.count):                     # parents first: a bone under a blocked one is out too
             p = rig.parents[i]
             ok[i] = i not in blocked and (p < 0 or ok[p])
-        self.bones = np.array(sorted(i for i in set(wanted) if ok[i] and not rig.chain[i]), dtype=int)
+        wanted = {int(i) for i in wanted if not rig.chain[i]}
+        self.bones = np.array(sorted(i for i in wanted if ok[i]), dtype=int)
+        self.complete = len(self.bones) == len(wanted)        # every bone asked for can be sampled
         chosen = {rig.names[i] for i in self.bones}
         for curve in own:
             found = _bone_path(curve.data_path)
@@ -229,18 +231,26 @@ class InputKeys:
         if self.object_ok:
             self.object_curves = [(c, c.data_path, c.array_index) for c in own
                                   if c.data_path in OBJECT_CHANNELS and not c.mute]
+        self.rig = rig
         self.total = self._count()
 
     def _count(self):
-        """What the sampled curves were found from: the action, and its curves (with their mute flags)."""
-        data = self.data
+        """What the sampling was worked out from: the action and its curves (with their mute flags), and what
+        decides which bones and whether the object can be sampled -- constraints, drivers, NLA, parent."""
+        data, obj = self.data, self.rig.obj
         try:
-            return (data.action, len(_action_curves(data)), tuple(c.mute for c in _action_curves(data)))                 if data is not None else None
+            curves = _action_curves(data) if data is not None else []
+            return (data.action if data is not None else None, len(curves), tuple(c.mute for c in curves),
+                    tuple((c.type, c.enabled, c.influence > 0) for pb in obj.pose.bones for c in pb.constraints),
+                    tuple((c.type, c.enabled, c.influence > 0) for c in obj.constraints), obj.parent,
+                    len(data.drivers) if data is not None else 0,
+                    tuple((t.mute, len(t.strips)) for t in data.nla_tracks) if data is not None else ())
         except ReferenceError:
             return None
 
     def changed(self):
-        """Curves added, removed or muted, or another action: the curves must be found again."""
+        """Curves added, removed or muted, another action, or constraints, drivers, NLA or the parent changed:
+        what is sampled must be worked out again."""
         return self._count() != self.total
 
     def sample(self, frame, buffers):

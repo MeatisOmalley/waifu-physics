@@ -52,7 +52,6 @@ def build(keyed=True):
         pb.rotation_euler = (0.0, 0.0, 0.0)
     group = rig.waifu_physics.groups.add()
     group.roots.add().name = "h0"
-    group.dummy_bone_length = 0.05
     return rig
 
 
@@ -118,7 +117,8 @@ frames = range(1, 41)
 cached, _ = tips(frames)
 slow, ahead_slow = tips(frames, fast=False)
 fast, ahead_fast = tips(frames, fast=True)
-check("Fast Evaluation off never solves ahead", not any(ahead_slow) and all(ahead_fast[1:]))
+check("only keys move this rig, so even with Fast Evaluation off every frame is solved ahead (one evaluation)",
+      all(ahead_slow[1:]) and all(ahead_fast[1:]) and live.runtime(scene).exact_ahead)
 check("... and at the simulation's rate, live playback matches the cache",
       float(np.abs(slow - cached).max()) < 1e-6, float(np.abs(slow - cached).max()))
 check("... and Fast Evaluation too, here: only keys move the rig, so it reads this frame's input (not a frame late)",
@@ -256,11 +256,54 @@ check("... with the chain really hitting the collider on the swinging bone",
       float(np.abs(slow - played(free, fast=False)[0]).max()) > 0.05, float(np.abs(slow - played(free, fast=False)[0]).max()))
 obj = swinger(constrain=True)
 fast, ahead, rt = played(obj, fast=True)
-slow, _, _ = played(obj, fast=False)
+slow, ahead_slow, rt_slow = played(obj, fast=False)
 rig = rt.rigs[0]
 check("a constrained parent is left to Blender's last evaluation (and so is what hangs below it)",
       {rig.names[i] for i in rig.input_keys.bones} == set() and all(ahead[1:]),
       [rig.names[i] for i in rig.input_keys.bones])
+check("... so solving ahead is not exact: Fast Evaluation off evaluates twice there, on accepts the lag",
+      not rt_slow.exact_ahead and not any(ahead_slow) and float(np.abs(fast - slow).max()) > 1e-3,
+      float(np.abs(fast - slow).max()))
+
+# --- whatever else moves makes it inexact: an animated scene collider; a constraint added while playing
+obj = swinger()
+ground = colliders.add_to_scene("Sphere")
+ground.location.z = 3.0
+ground.keyframe_insert("location", frame=1)
+_, ahead_slow, rt_slow = played(obj, fast=False)
+check("an animated scene collider is read a frame late ahead, so off evaluates twice", not rt_slow.exact_ahead
+      and not any(ahead_slow))
+bpy.data.objects.remove(ground)
+obj = swinger()
+scene.waifu_physics.fast_evaluation = False
+scene.frame_set(1)
+scene.waifu_physics.simulate = True
+scene.frame_set(2)
+check("... and with nothing moving but keys, exact", live.runtime(scene).exact_ahead)
+c = obj.pose.bones["base"].constraints.new("DAMPED_TRACK")
+c.target, c.subtarget = obj, "target"
+bpy.context.view_layer.update()
+scene.frame_set(3)
+scene.frame_set(4)
+check("a constraint added while playing is noticed: the simulation is rebuilt, and no longer solved ahead",
+      not live.runtime(scene).exact_ahead and live.runtime(scene).stepped_ahead != 4)
+scene.waifu_physics.simulate = False
+
+# --- a cache draws its own frames' points, not the simulation's last state
+draw = sys.modules["waifu_physics.ui.draw"]
+obj = swinger()
+scene.frame_set(1)
+bpy.ops.waifu_physics.cache_toggle()
+off = []
+for f in (7, 19, 31):
+    scene.frame_set(f)
+    bpy.context.view_layer.update()
+    spheres = draw._simulated_spheres(scene)
+    heads = [obj.matrix_world @ obj.pose.bones[n].head for n in ("s1", "s2")]
+    off.append(max(min((centre - head).length for centre, _r, _c in spheres) for head in heads))
+check("with a cache, the collision spheres are drawn where the cached frame put the chain", max(off) < 1e-4, off)
+bpy.ops.waifu_physics.cache_toggle()
+scene.waifu_physics.simulate = False
 ik = obj.pose.bones["s2"].constraints.new("IK")
 ik.target, ik.subtarget, ik.chain_count = obj, "target", 0
 for c in list(obj.pose.bones["base"].constraints):

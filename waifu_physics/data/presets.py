@@ -15,12 +15,12 @@ _NO_CURVES = {f"use_{setting}_curve": False for setting in curves.CURVED}
 PRESETS = {
     "HAIR": ("Hair", "Light strands: loose, quick to settle, riding along with the head", {
         "damping": 0.1, "stiffness": 0.05, "world_damping_location": 0.8, "world_damping_rotation": 0.8,
-        "radius": 0.01, "limit_angle": 0.0, "dummy_bone_length": 0.03,
+        "radius": 0.01, "limit_angle": 0.0,
         "bone_subdivision_count": 0, "bridge_count": 0, "planar_constraint": "NONE",
     }),
     "SKIRT": ("Skirt", "Panels hanging from the hips: heavier, held in shape, colliding as one surface", {
         "damping": 0.2, "stiffness": 0.1, "world_damping_location": 0.6, "world_damping_rotation": 0.6,
-        "radius": 0.02, "limit_angle": 0.0, "dummy_bone_length": 0.05,
+        "radius": 0.02, "limit_angle": 0.0,
         "compliance": "LEATHER", "auto_child_dummy_links": True, "bridge_count": 1, "bridge_feedback": 1.0,
         "bone_subdivision_count": 0, "planar_constraint": "NONE",
     }),

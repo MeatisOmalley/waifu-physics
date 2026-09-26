@@ -59,7 +59,6 @@ def scene_with(roots, walk=True):
     group = vroid.waifu_physics.groups.add()
     for name in roots:
         group.roots.add().name = name
-    group.dummy_bone_length = 0.05
     return base, vroid, group
 
 

@@ -134,7 +134,25 @@ def group_to_dict(group):
         "curves": {setting: data for setting, data in used.items() if data is not None},
         "forces": forces_to_list(group),
         "sync_bones": sync_to_list(group),
+        # Where each chain's tip point sits past its last bone: that bone's length. Blender knows it; Kawaii
+        # (DummyBoneLength) must be told, per chain. Written for exporters, never read back.
+        "tips": chain_tips(group),
     }
+
+
+def chain_tips(group):
+    """{last bone of each chain (every branch's end): its rest length, in Blender units}."""
+    from .links import chain_subtree
+    obj = group.id_data
+    excluded = [item.name for item in group.excluded]
+    found = {}
+    for root in group.roots:
+        names = chain_subtree(obj, root.name, excluded)
+        for name in names:
+            bone = obj.data.bones[name]
+            if not any(child.name in names for child in bone.children):
+                found[name] = bone.length
+    return found
 
 
 def group_from_dict(group, data):

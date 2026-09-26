@@ -443,9 +443,6 @@ class WaifuPhysicsGroup(PropertyGroup):
     legacy_gravity: BoolProperty(name="Legacy Gravity", default=False, update=_structure_changed,
                                  description="Use the older gravity, added to position instead of velocity")
 
-    dummy_bone_length: FloatProperty(name="Tip Length", default=0.0, min=0.0, subtype="DISTANCE",
-                                     update=_structure_changed,
-                                     description="Add a point past each chain's last bone, so that bone swings too")
     bone_subdivision_count: IntProperty(name="Subdivisions", default=0, min=0, max=10, update=_structure_changed,
                                         description="Extra collision points along each bone")
     bone_subdivision_collision_only: BoolProperty(name="Collision Only", default=True, update=_structure_changed,
@@ -543,8 +540,9 @@ class WaifuPhysicsScene(PropertyGroup):
         description="Step at a fixed rate in live playback. Off steps once per frame")
     fast_evaluation: BoolProperty(
         name="Fast Evaluation (Live Preview)", default=False,
-        description=("Live playback evaluates each frame once, reacting to the body a frame late. Off reacts on "
-                     "time but evaluates each frame twice. The cache is always perfectly accurate"))
+        description=("Evaluate each frame once in live playback, even where the input is then a frame late "
+                     "(constraints, drivers or IK move what the chains hang from). Off does so only where it "
+                     "stays exact. The cache is always perfectly accurate"))
     edit_selected_groups: BoolProperty(
         name="Edit Selected Groups", default=True,
         description="Changes apply to every group with a selected bone")

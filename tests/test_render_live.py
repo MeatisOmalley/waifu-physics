@@ -33,7 +33,6 @@ for i in range(3):
 bpy.ops.object.mode_set(mode="OBJECT")
 group = rig.waifu_physics.groups.add()
 group.roots.add().name = "c0"
-group.dummy_bone_length = 0.1
 group.damping = 0.05
 scene.frame_start, scene.frame_end = 1, 12
 
