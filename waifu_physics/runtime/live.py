@@ -460,13 +460,15 @@ class Runtime:
         return next((scene for scene in bpy.data.scenes if scene.as_pointer() == self.scene_pointer), None)
 
     def sync_clock(self, scene):
-        """Steps per Second or Fixed Steps changed: the solver's clock follows where it is, so the chains swing
-        on (a rebuild would put them back at the pose). Their velocities are kept: the solver takes velocity as
-        the last step's displacement over the previous step's time, so the displacement is rescaled to the new
-        step time. A bake keeps playing, outdated; live frames are dropped. Returns whether it changed."""
+        """The frame range, frame rate, Steps per Second or Fixed Steps changed: the solver's clock follows where it
+        is, so the chains swing on (a rebuild would put them back at the pose). The frame range only says where
+        playback loops and what a bake covers; the frame rate is read every frame. With a new step time the
+        velocities are kept: the solver takes velocity as the last step's displacement over the previous step's
+        time, so the displacement is rescaled to it. A bake keeps playing, outdated; live frames are dropped.
+        Returns whether anything changed."""
         key = frame_cache.key(scene)
-        if not self.scene_clock or key == self.cache_key or key[:4] != self.cache_key[:4]:
-            return False                          # unchanged, a bake's own clock, or the frame range/rate moved
+        if not self.scene_clock or key == self.cache_key:
+            return False                          # unchanged, or a bake's own clock
         s, settings = self.system, scene.waifu_physics
         before = F32(s.dt_old)
         s.target_framerate = int(settings.target_framerate)
@@ -477,7 +479,7 @@ class Runtime:
             s.dt_old = after
         fps = scene.render.fps / scene.render.fps_base
         self.interpolate = fps > s.target_framerate
-        _outdate(self, "the simulation rate changed")
+        _outdate(self, "the frame range or rate changed")
         self.cache_key = key
         return True
 

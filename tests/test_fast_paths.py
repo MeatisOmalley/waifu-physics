@@ -165,6 +165,29 @@ doubled, _ = swing(frames, (15, 120))
 jumps = np.linalg.norm(np.diff(doubled, axis=0), axis=1)
 check("... and doubling it keeps the chain's velocity: no jump at the change",
       jumps[13] < 2.0 * max(jumps[11], jumps[12], 1e-4), (jumps[11], jumps[12], jumps[13]))
+# --- the frame range changed while playing: where playback loops, not the physics: the same run swings on
+def ranged(frames, changes):
+    """The tip each frame, playing live, the frame range changed at frames: {frame: (start, end)}."""
+    settings = scene.waifu_physics
+    settings.simulate = False
+    scene.frame_start, scene.frame_end = 1, 40
+    scene.frame_set(1)
+    settings.simulate = True
+    first, found = live.runtime(scene), []
+    for f in frames:
+        if f in changes:
+            scene.frame_start, scene.frame_end = changes[f]
+        scene.frame_set(f)
+        bpy.context.view_layer.update()
+        found.append(np.array(rig.matrix_world @ rig.pose.bones["h3"].tail))
+    return np.array(found), live.runtime(scene) is first
+
+
+plain, _ = ranged(range(1, 31), {})
+moved, same = ranged(range(1, 31), {10: (1, 60), 18: (5, 60)})
+check("changing the frame range while playing keeps the running simulation, and changes nothing about it",
+      same and float(np.abs(moved - plain).max()) == 0.0, float(np.abs(moved - plain).max()))
+scene.frame_start, scene.frame_end = 1, 40
 scene.waifu_physics.simulate = False
 scene.waifu_physics.target_framerate = 60
 scene.frame_set(1)
