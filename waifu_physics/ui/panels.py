@@ -60,6 +60,12 @@ class WAIFU_PHYSICS_PT_main(bpy.types.Panel):
         row.enabled = grouped or settings.simulate
         row.prop(settings, "simulate", toggle=True, icon="PHYSICS")
         row.operator("waifu_physics.reset", text="", icon="FILE_REFRESH")
+        if live.last_error and not settings.simulate:       # it stopped itself: say why, until it is on again
+            stopped = layout.box().column(align=True)
+            stopped.alert = True
+            stopped.label(text="The simulation stopped on an error.", icon="ERROR")
+            stopped.label(text=live.last_error[:80])
+            stopped.label(text="Details are in the system console.")
         current = live._runtimes.get(scene.as_pointer())
         span = current.cached_range() if live.is_cached(scene) else None
         row = layout.row(align=True)

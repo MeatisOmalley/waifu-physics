@@ -37,6 +37,7 @@ _writing = False              # our own writes are in progress (the cache ignore
 
 
 _building_cache = False
+last_error = None             # why the simulation last stopped itself; the panel shows it until Simulate is on again
 
 
 def _outdate(current, reason):
@@ -191,6 +192,11 @@ class Runtime:
             keys = rig.input_keys
             if not (keys.complete and keys.object_ok) or np.any(rig.constrained & rig.chain):
                 return False
+            if rig.setting_keys is not None and rig.setting_keys.blocked:
+                return False                      # settings a driver or NLA animates: known only after evaluation
+        if _animated(scene, "gravity") and any(self._group(g)[1].use_scene_gravity
+                                                 for g in range(len(self.group_props))):
+            return False
         sampled = {(rig.uid, rig.names[i]) for rig in self.rigs for i in rig.input_keys.bones}
         for g in range(len(self.group_props)):
             for obj in collider_objects.group_colliders(self._group(g)[1], scene):
@@ -387,6 +393,9 @@ class Runtime:
         s = self.system
         frame = frame_of(scene)
         poses = [rig.read_ahead(frame) if ahead else rig.read() for rig in self.rigs]
+        # Ahead of evaluation the groups' keyframed settings still hold last frame's values: read them sampled.
+        keyed = [rig.setting_keys.sample(frame) if ahead and rig.setting_keys is not None
+                 and len(rig.setting_keys.curves) else {} for rig in self.rigs]
         pose = np.zeros((len(self.real), 4, 4))
         for r, rig_pose in enumerate(poses):
             rows = self.rig_of_point == r
@@ -397,9 +406,11 @@ class Runtime:
         s.frame_number = scene.frame_current if sample_number is None else sample_number
         wind = scene_wind(scene, self.cm)
         for g in range(len(self.group_props)):
-            rig, props = self._group(g)
+            rig, real = self._group(g)
+            sampled = keyed[self.group_props[g][0]]
+            props = chain_keys.Sampled(real, sampled) if sampled else real
             s.groups[g].settings = self._settings(props)
-            s.groups[g].curves = group_curves.curves(props)
+            s.groups[g].curves = group_curves.curves(real)
             self._frame_forces(g, rig, props, scene)
             s.wind[g] = wind
             world = rig.world
@@ -639,6 +650,16 @@ class Runtime:
                    or (rig.input_keys is not None and rig.input_keys.changed()) for rig in self.rigs)
 
 
+def _animated(owner, path):
+    """Does anything animate this property of an ID: its action, NLA or a driver?"""
+    data = owner.animation_data
+    if data is None:
+        return False
+    found = [d.data_path for d in data.drivers] + chain_keys._foreign_paths(data)
+    found += [c.data_path for c in chain_keys._action_curves(data)]
+    return path in found
+
+
 def _still(obj, parent=True):
     """Does nothing move the object between frames: no animation, drivers or constraints of its own, and (with
     parent) no parent that moves? A parent bone of an armature counts as moving."""
@@ -842,9 +863,11 @@ def bake_cache(scene, progress=None):
 
 
 def set_simulating(scene, on):
+    global last_error
     if _building_cache:
         return
     if on:
+        last_error = None
         previous = _runtimes.pop(scene.as_pointer(), None)
         if previous is not None:
             previous.release()
@@ -861,8 +884,7 @@ def set_simulating(scene, on):
         chain_keys.recover(scene.objects)
 
 
-@persistent
-def _frame_changing(scene, depsgraph=None):
+def _frame_changing_body(scene, depsgraph=None):
     """Before Blender evaluates a frame: write a cached frame, so renders see it; otherwise clear
     last frame's physics from the chains, so the evaluated pose is a clean input."""
     settings = scene.waifu_physics
@@ -900,8 +922,7 @@ def _frame_changing(scene, depsgraph=None):
     current.restore(frame_of(scene))
 
 
-@persistent
-def _frame_changed(scene, depsgraph=None):
+def _frame_changed_body(scene, depsgraph=None):
     if _building_cache:
         return
     settings = scene.waifu_physics
@@ -972,8 +993,7 @@ def _armature_changes(scene, depsgraph):
             mark_dirty(scene)                  # an armature with groups added, deleted or unlinked
 
 
-@persistent
-def _depsgraph_updated(scene, depsgraph):
+def _depsgraph_updated_body(scene, depsgraph):
     if _building_cache:
         return
     _armature_changes(scene, depsgraph)
@@ -991,6 +1011,48 @@ def _depsgraph_updated(scene, depsgraph):
         # mutes), but Blender would now apply it over the physics: take the curves over again.
         _outdate(current, "the keys changed")
         mark_dirty(scene)
+
+
+def _stop_after_error(scene, error):
+    """An unexpected error while simulating: report it once, drop the simulation and hand every chain curve back
+    (by the armatures' records, which cannot depend on the state that failed), and switch Simulate off -- rather
+    than fail again on every frame with the curves still muted."""
+    global last_error
+    import traceback
+    traceback.print_exc()
+    last_error = f"{type(error).__name__}: {error}"
+    current = _runtimes.pop(scene.as_pointer(), None)
+    _dirty.discard(scene.as_pointer())
+    for step in (lambda: current is not None and current.release(), lambda: chain_keys.recover(scene.objects),
+                 lambda: setattr(scene.waifu_physics, "simulate", False)):
+        try:
+            step()
+        except Exception:
+            pass
+
+
+@persistent
+def _frame_changing(scene, depsgraph=None):
+    try:
+        _frame_changing_body(scene, depsgraph)
+    except Exception as error:
+        _stop_after_error(scene, error)
+
+
+@persistent
+def _frame_changed(scene, depsgraph=None):
+    try:
+        _frame_changed_body(scene, depsgraph)
+    except Exception as error:
+        _stop_after_error(scene, error)
+
+
+@persistent
+def _depsgraph_updated(scene, depsgraph):
+    try:
+        _depsgraph_updated_body(scene, depsgraph)
+    except Exception as error:
+        _stop_after_error(scene, error)
 
 
 @persistent

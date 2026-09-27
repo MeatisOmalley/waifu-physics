@@ -21,7 +21,7 @@ Every bone of a chain swings, the last one too: its tip point is the bone's tail
 
 The input is the pose Blender evaluates each frame. It includes animation, constraints, drivers and IK, so hair under a head that copies another rig follows it. Before each frame, Waifu Physics clears its own output from the chain bones, so last frame's physics never feeds back. Keyed chain channels keep their animation, and unkeyed ones start from rest. Start a group below any constrained bones: Blender applies a constraint after the simulation's output, so a constrained bone in a chain cannot be moved. The panel warns when a group contains one.
 
-**Speed.** Live playback evaluates each frame once wherever that stays exact. That means keyframes alone move the bones the chains hang from, the bones colliders hang from and the armature, and no collider or force field moves by itself. Waifu Physics then samples those keys and solves before Blender evaluates the frame. Where constraints, drivers, IK or NLA move that input, it solves after evaluation instead, which costs a second evaluation of whatever the chains move. **Fast Evaluation (Live Preview)**, in Advanced > Solver, solves before evaluation everywhere and accepts that such input arrives a frame late. The panel says which path playback is on. The cache is always exact.
+**Speed.** Live playback evaluates each frame once wherever that stays exact. That means keyframes alone move the bones the chains hang from, the bones colliders hang from, the armature and the physics settings, and no collider or force field moves by itself. Waifu Physics then samples those keys and solves before Blender evaluates the frame. Where constraints, drivers, IK or NLA move that input, it solves after evaluation instead, which costs a second evaluation of whatever the chains move. **Fast Evaluation (Live Preview)**, in Advanced > Solver, solves before evaluation everywhere and accepts that such input arrives a frame late. The panel says which path playback is on. The cache is always exact.
 
 While simulating, Waifu Physics takes over the chain bones' keyframes: it mutes those F-curves, records them on the armature, and samples them itself. The keys still drive the simulation. They are unmuted when Simulate is off, in every saved file, after an undo, and on load after a crash. A chain channel animated by an NLA strip or a driver can't be taken over, and that rig evaluates twice per frame. The cache evaluates only what the simulation reads (the armatures, their constraint and driver targets, colliders and force fields) and hides everything else while it bakes.
 
@@ -52,7 +52,7 @@ Where Waifu Physics' defaults and conventions differ from Kawaii's:
 ## Known limitations
 
 - Rigs whose bones copy another rig (Copy Transforms, as Waifu Workshop's garment rigs do) evaluate twice per frame in live playback, or with Fast Evaluation arrive a frame late.
-- With Fast Evaluation on, keyframed physics settings (stiffness and the like) take effect a frame late.
+- Physics settings animated by a driver or an NLA strip are known only after Blender evaluates the frame, so they evaluate twice per frame in live playback, or with Fast Evaluation arrive a frame late. Keyframed settings are sampled for the frame and are exact.
 - The C step ships for Windows and Linux. Elsewhere, such as macOS, the numpy step runs the same simulation about five times slower.
 
 ## Development

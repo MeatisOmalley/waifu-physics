@@ -34,16 +34,20 @@ def apply(group, key):
 
 
 # --------------------------------------------------------------------------- the user's own presets
-# Saved as the group's settings and curves (what Copy Settings copies), one JSON file each, in Blender's user
-# presets folder, so every file can use them. The group's on/off switch and what it collides with are not
-# settings a preset should set.
-FOLDER = "presets/waifu_physics/groups"
+# Saved as the group's settings and curves (what Copy Settings copies), one JSON file each, in the extension's own
+# user folder, so every file can use them and Blender removes them with the extension. The group's on/off switch and
+# what it collides with are not settings a preset should set.
+FOLDER = "presets/waifu_physics/groups"         # loaded from a checkout rather than installed: Blender's presets
 _NOT_PRESET = {"enabled", "use_all_colliders", "use_scene_colliders", "custom_collider_sets"}
 
 
 def folder(create=False):
     import bpy
-    return bpy.utils.user_resource("SCRIPTS", path=FOLDER, create=create)
+    package = __package__.rsplit(".", 1)[0]    # the extension's module: bl_ext.<repository>.waifu_physics
+    try:
+        return bpy.utils.extension_path_user(package, path="presets", create=create)
+    except ValueError:                          # not installed as an extension (a development checkout)
+        return bpy.utils.user_resource("SCRIPTS", path=FOLDER, create=create)
 
 
 def user_presets():

@@ -243,5 +243,35 @@ check("the animation cleared right before a frame: no stale animation data used,
       len(live.runtime(scene).rigs[0].keys.curves) == 0 and rig.animation_data is None)
 scene.waifu_physics.simulate = False
 
+
+# --- an unexpected error while simulating stops it once, cleanly: Simulate off, every curve handed back, the reason
+# kept for the panel -- not a traceback on every frame with the curves still muted
+rig = build()
+scene.waifu_physics.fast_evaluation = False
+scene.frame_set(1)
+scene.waifu_physics.simulate = True
+scene.frame_set(2)
+plain_step = live.Runtime.step
+
+
+def failing(self, *args, **kwargs):
+    raise RuntimeError("the solver broke")
+
+
+live.Runtime.step = failing
+scene.frame_set(3)
+check("an error while simulating switches Simulate off and says why",
+      not scene.waifu_physics.simulate and live.last_error and "the solver broke" in live.last_error, live.last_error)
+check("... hands every chain curve back", not any(c.mute for c in curves(rig)) and keys.MARK not in rig.keys())
+scene.frame_set(4)
+scene.frame_set(5)
+check("... and later frames play on without it", live._runtimes.get(scene.as_pointer()) is None)
+live.Runtime.step = plain_step
+scene.waifu_physics.simulate = True
+scene.frame_set(6)
+check("switching Simulate on again clears the message and simulates", live.last_error is None
+      and live._runtimes.get(scene.as_pointer()) is not None)
+scene.waifu_physics.simulate = False
+
 addon.unregister()
 finish()

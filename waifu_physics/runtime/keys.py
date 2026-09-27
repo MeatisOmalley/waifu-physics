@@ -18,6 +18,7 @@ previous session did not get to (the armature remembers what Waifu Physics muted
 """
 import json
 
+import bpy
 import numpy as np
 
 MARK = "waifu_physics_muted"       # object ID property: the curves Waifu Physics muted, to recover after a crash
@@ -351,6 +352,96 @@ def release_marked(obj):
     for mark in (MARK, LEGACY_MARK):
         if mark in obj.keys():
             del obj[mark]
+
+
+SETTINGS_ROOT = "waifu_physics."
+
+
+class SettingKeys:
+    """Keyframed physics settings of an armature's groups (and of their forces, sync bones and targets), sampled for
+    the frame. Before Blender evaluates a frame the properties still hold last frame's values, so the
+    one-evaluation path reads them through these (Sampled). Held by path (HeldCurves). Settings a driver or an NLA
+    strip animates, or an action blended at less than full, cannot be known before evaluation: `blocked` says so,
+    and live playback then evaluates first unless Fast Evaluation accepts the lag."""
+
+    def __init__(self, obj):
+        data = obj.animation_data
+        entries = []
+        self.blocked = False
+        if data is not None:
+            for curve in _action_curves(data):
+                path = curve.data_path
+                if not path.startswith(SETTINGS_ROOT) or curve.mute or "." not in path:
+                    continue
+                owner, attribute = path.rsplit(".", 1)
+                try:                                  # the owner as read at run time names itself (path_from_id)
+                    owner = obj.path_resolve(owner).path_from_id()
+                except (ValueError, AttributeError):
+                    continue
+                entries.append((curve, path, curve.array_index, (owner, attribute, curve.array_index)))
+            foreign = _foreign_paths(data)
+            whole = data.action_influence >= 1.0 and data.action_blend_type == "REPLACE"
+            self.blocked = any(p.startswith(SETTINGS_ROOT) for p in foreign) or bool(entries and not whole)
+        self.curves = HeldCurves(obj, entries)
+
+    def sample(self, frame):
+        """{owner path: {attribute: {array index: value}}}: this frame's keyed values, as the curves give them."""
+        found = {}
+        for curve, (owner, attribute, index) in self.curves.resolved():
+            found.setdefault(owner, {}).setdefault(attribute, {})[index] = curve.evaluate(frame)
+        return found
+
+
+def _as_blender_sets(struct, name, current, keyed):
+    """A keyed value as Blender's animation system would have set it (anim_sys.cc animsys_write_rna_setting):
+    booleans true above 1 - epsilon, integers truncated and clamped, floats in single precision and clamped,
+    enums by their number. Arrays keep their unkeyed items."""
+    prop = struct.bl_rna.properties[name]
+
+    def one(value, was):
+        if prop.type == "BOOLEAN":
+            return bool(value > 1.0 - 1.1920929e-07)
+        if prop.type == "INT":
+            return min(max(int(value), prop.hard_min), prop.hard_max)
+        if prop.type == "FLOAT":
+            return float(min(max(np.float32(value), np.float32(prop.hard_min)), np.float32(prop.hard_max)))
+        if prop.type == "ENUM":
+            return next((item.identifier for item in prop.enum_items if item.value == int(value)), was)
+        return was
+
+    if getattr(prop, "is_array", False) and prop.type != "ENUM":
+        out = list(current)
+        for index, value in keyed.items():
+            if 0 <= index < len(out):
+                out[index] = one(value, out[index])
+        return out
+    return one(keyed.get(0, keyed.get(-1)), current) if keyed else current
+
+
+class Sampled:
+    """A settings struct read with this frame's sampled keys (SettingKeys.sample) over its own values: a keyed
+    property gives the frame's value, anything else the property's own. Collections of settings structs (forces,
+    sync bones, their targets) are read the same way. Writes go to the struct itself."""
+    __slots__ = ("_real", "_frame", "_keyed")
+
+    def __init__(self, real, frame_values):
+        object.__setattr__(self, "_real", real)
+        object.__setattr__(self, "_frame", frame_values)
+        object.__setattr__(self, "_keyed", frame_values.get(real.path_from_id(), {}))
+
+    def __getattr__(self, name):
+        real = self._real
+        value = getattr(real, name)
+        keyed = self._keyed.get(name)
+        if keyed is not None:
+            return _as_blender_sets(real, name, value, keyed)
+        if self._frame and isinstance(value, bpy.types.bpy_prop_collection):
+            return [Sampled(item, self._frame) if isinstance(item, bpy.types.PropertyGroup) else item
+                    for item in value]
+        return value
+
+    def __setattr__(self, name, value):
+        setattr(self._real, name, value)
 
 
 def recover(objects):

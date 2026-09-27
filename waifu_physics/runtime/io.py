@@ -254,6 +254,7 @@ class Rig:
         self.keys = None
         self.constrained = np.zeros(self.count, dtype=bool)
         self.input_keys = None                 # chain_keys.InputKeys: what the chains hang from, sampled ahead
+        self.setting_keys = None               # chain_keys.SettingKeys: the groups' keyframed settings, sampled ahead
         self.ahead_levels = []                 # sampled bones and chain bones by depth, parents first
         self.world = obj.matrix_world.copy()   # the armature's world matrix this frame, as far as it is known
         self.evaluated = None                  # the pose and world matrix as Blender last evaluated them
@@ -323,6 +324,7 @@ class Rig:
                     wanted.add(int(p))
                 p = self.parents[p]
         self.input_keys = chain_keys.InputKeys(self, wanted)
+        self.setting_keys = chain_keys.SettingKeys(self.obj)
         rows = np.union1d(self.input_keys.bones, np.flatnonzero(self.chain)).astype(int)
         depth = np.zeros(self.count, dtype=int)
         for i in range(self.count):
