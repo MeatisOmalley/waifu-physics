@@ -546,7 +546,7 @@ def _add_to_bones(layout, context, settings):
     label.alignment = "RIGHT"
     label.label(text="Collider Type")
     split.prop(settings, "collider_shape", text="")
-    bones = (context.selected_pose_bones or ()) if context.mode == "POSE" else ()
+    bones = colliders.generation_bones(context)
     again = any(colliders.has_collider(bone.id_data, bone.name) for bone in bones)
     # Bones a group simulates take no collider (it would chase the chain it pushes): with one selected, the
     # buttons wait.
@@ -564,7 +564,7 @@ def _add_to_bones(layout, context, settings):
     elif bones:
         _caption(layout, "Each selected bone gets one collider,", "fitted to the skin weighted to it.")
     else:
-        _caption(layout, "Select bones in Pose Mode. Each one gets", "a collider fitted to the skin weighted to it.")
+        _caption(layout, "Select pose bones or bone-parented colliders.", "Each bone gets a collider fitted to its skin.")
 
 
 def _chain_radius(layout, context, group):

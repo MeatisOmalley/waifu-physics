@@ -322,6 +322,36 @@ def _bone_of(armature, obj):
     return armature.pose.bones.get(obj.parent_bone)
 
 
+def generation_bones(context, active_only=False):
+    """Targets for Add/Regenerate: pose bones or selected bone-parented colliders.
+
+    Use actual selection, not the panel's remembered collider. Scene colliders
+    have no bone to fit to and do not enable these armature-collider commands.
+    """
+    obj = context.object
+    if context.mode == "POSE" and obj is not None and obj.type == "ARMATURE":
+        bones = [context.active_pose_bone] if active_only else (context.selected_pose_bones or ())
+        return [b for b in bones if b is not None and b.id_data == obj]
+    if context.mode != "OBJECT":
+        return []
+    selected = list(context.selected_objects)
+    if active_only and obj in selected:
+        selected.remove(obj)
+        selected.insert(0, obj)
+    found, seen = [], set()
+    for collider in selected:
+        parent = collider.parent
+        if not is_collider(collider) or parent is None or parent.type != "ARMATURE":
+            continue
+        bone = _bone_of(parent, collider)
+        if bone is not None and (parent.name, bone.name) not in seen:
+            seen.add((parent.name, bone.name))
+            found.append(bone)
+            if active_only:
+                break
+    return found
+
+
 def chosen(scene, stored=None):
     """Every collider the viewport has selected, the picked one (picked) among them: selected collider objects;
     in Pose Mode, the colliders on the armature's selected bones."""

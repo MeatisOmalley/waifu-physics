@@ -351,24 +351,23 @@ class WAIFU_PHYSICS_OT_reset(bpy.types.Operator):
 class WAIFU_PHYSICS_OT_collider_add(bpy.types.Operator):
     bl_idname = "waifu_physics.collider_add"
     bl_label = "Add Collider"
-    bl_description = "Add a collider to the active bone, fitted to its skin"
+    bl_description = "Add a collider fitted to the active bone, or the selected collider's parent bone"
     bl_options = {"REGISTER", "UNDO"}
 
     shape: bpy.props.EnumProperty(name="Shape", items=colliders.SHAPE_CHOICES, default="AUTO")
 
     @classmethod
     def poll(cls, context):
-        obj = context.object
-        return (obj is not None and obj.type == "ARMATURE" and context.mode == "POSE"
-                and context.active_pose_bone is not None)
+        return bool(colliders.generation_bones(context, active_only=True))
 
     def execute(self, context):
-        name = context.active_pose_bone.name
-        if name in colliders.simulated_bones(context.object):
+        bone = colliders.generation_bones(context, active_only=True)[0]
+        armature, name = bone.id_data, bone.name
+        if name in colliders.simulated_bones(armature):
             self.report({"ERROR"}, f"{name} is in a chain: a collider there would chase the chain it pushes. "
                                    "Put it on a bone the chain hangs from")
             return {"CANCELLED"}
-        obj = colliders.add(context.object, name, self.shape, context)
+        obj = colliders.add(armature, name, self.shape, context)
         context.scene.waifu_physics.last_collider = obj.name
         live.mark_dirty(context.scene)
         return {"FINISHED"}
@@ -395,26 +394,31 @@ class WAIFU_PHYSICS_OT_scene_collider_add(bpy.types.Operator):
 class WAIFU_PHYSICS_OT_colliders_from_bones(bpy.types.Operator):
     bl_idname = "waifu_physics.colliders_from_bones"
     bl_label = "Generate Colliders"
-    bl_description = ("Fit one collider to each selected bone, replacing any it has")
+    bl_description = ("Fit one collider to each selected bone or selected collider's parent bone, replacing any it has")
     bl_options = {"REGISTER", "UNDO"}
 
     shape: bpy.props.EnumProperty(name="Shape", items=colliders.SHAPE_CHOICES, default="AUTO")
 
     @classmethod
     def poll(cls, context):
-        obj = context.object
-        return (obj is not None and obj.type == "ARMATURE" and context.mode == "POSE"
-                and any(pb.id_data == obj for pb in context.selected_pose_bones or ()))
+        return bool(colliders.generation_bones(context))
 
     def execute(self, context):
-        obj = context.object
-        names = [pb.name for pb in context.selected_pose_bones if pb.id_data == obj]
-        in_chains = set(names) & colliders.simulated_bones(obj)
-        replaced = sum(1 for name in names if name not in in_chains and colliders.has_collider(obj, name))
-        made = colliders.from_bones(obj, names, self.shape, context, replace=True)
+        targets = {}
+        for bone in colliders.generation_bones(context):
+            targets.setdefault(bone.id_data, []).append(bone.name)
+        made, replaced, skipped = [], 0, 0
+        for obj, names in targets.items():
+            in_chains = set(names) & colliders.simulated_bones(obj)
+            skipped += len(in_chains)
+            replaced += sum(1 for name in names if name not in in_chains and colliders.has_collider(obj, name))
+            made.extend(colliders.from_bones(obj, names, self.shape, context, replace=True))
+        if made and context.mode == "OBJECT":
+            colliders.select(context.scene, made, activate=made[-1])
+            context.scene.waifu_physics.last_collider = made[-1].name
         live.mark_dirty(context.scene)
         notes = ([f"{replaced} replaced"] if replaced else []) + (
-            [f"{len(in_chains)} bones in chains skipped"] if in_chains else [])
+            [f"{skipped} bones in chains skipped"] if skipped else [])
         self.report({"INFO"}, f"Generated {len(made)} colliders" + (f" ({', '.join(notes)})" if notes else ""))
         return {"FINISHED"}
 
