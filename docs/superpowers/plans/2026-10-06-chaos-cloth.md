@@ -4,7 +4,7 @@
 
 **Goal:** Preview in Blender, live, what a garment's cloth will do in a game running Chaos Cloth: a second solver in Waifu Physics, a faithful port of the Chaos Cloth simulation the game runs, driven by the same per-vertex paint the game reads, colliding with the same colliders.
 
-**Architecture:** A port of the step Unreal's skeletal-mesh clothing runs (the legacy `FPBDEvolution` with PBD constraints, Chaos's defaults), as a pure function over flat arrays holding every cloth particle in the scene. It exists twice, in C (the same ctypes DLL pipeline as the Kawaii step) and in numpy (every platform, and the reference); constraints are coloured into batches that share no particle, and both backends walk the same batches in the same order, so they agree exactly. Blender I/O is one bulk read of skinned positions and one bulk write of simulated positions per mesh per frame, through a Geometry Nodes modifier, so nothing destructive touches the mesh. The Kawaii solver is untouched: bone chains keep Kawaii parity, cloth gets Chaos parity. Waifu Workshop's Cloth panel becomes a thin layer over this.
+**Architecture:** A port of the step WaifuSim's skeletal-mesh clothing runs (Chaos's `Softs::FEvolution` with PBD constraints and Chaos's defaults; WaifuSim selects it over the legacy evolution), as a pure function over flat arrays holding every cloth particle in the scene. It exists twice, in C (the same ctypes DLL pipeline as the Kawaii step) and in numpy (every platform, and the reference); constraints are coloured into batches that share no particle, and both backends walk the same batches in the same order, so they agree exactly. Blender I/O is one bulk read of skinned positions and one bulk write of simulated positions per mesh per frame, through a Geometry Nodes modifier, so nothing destructive touches the mesh. The Kawaii solver is untouched: bone chains keep Kawaii parity, cloth gets Chaos parity. Waifu Workshop's Cloth panel becomes a thin layer over this.
 
 **Tech Stack:** Blender 5.2 (Python, numpy 2.3, bpy, Geometry Nodes), C via ctypes (MSVC 2022 Build Tools; Linux through the existing workflow), Unreal Engine 5.8's Chaos Cloth source as the behavioural specification, WaifuSim for golden data.
 
@@ -19,19 +19,20 @@ Recorded 2026-10-06 (WaifuSim branch history, `docs/superpowers/plans/2026-09-20
 | Finding | Evidence |
 | --- | --- |
 | The game's mod garments simulate on Unreal's skeletal-mesh clothing | WaifuSim `Mods/WaifuModCloth.cpp` builds a `UClothingAssetCommon` at runtime; a cooked Development build draws it simulating (`waifu.ClothSpike`). The Chaos Cloth Asset route is editor-only for render data |
-| That path runs the **legacy** evolution | `bClothUseLegacyEvolution = true` (`ChaosClothingSimulation.cpp:69`, cvar `p.ChaosCloth.UseLegacyEvolution`) is passed to the solver (`:313`); `IsLegacySolver()` is `!!PBDEvolution` (`ChaosClothingSimulationSolver.h:65`). So the reference step is `FPBDEvolution::AdvanceOneTimeStep` (`Chaos/Private/Chaos/PBDEvolution.cpp`), not `Softs::FEvolution` |
-| With defaults, one constraint pass per 60 Hz frame | Shared config: `IterationCount = 1`, `MaxIterationCount = 10`, `SubdivisionCount = 1`, `bUseXPBDConstraints = false` (`ChaosClothConfig.h:573-627`). Iterations per step = `round(60 * dt * IterationCount)` clamped to [1, 10] (`ChaosClothingSimulationSolver.cpp:2242-2255`); substeps divide dt |
-| Legacy step order | `PBDEvolution.cpp`: per particle range, the pre-iteration update (forces, velocity fields, damping, predicted positions), the collision kinematic update, constraint inits, collision rule inits, then each iteration: constraint rules, collision, post-collision rules; then velocities from positions. Constraint rules register in the order `FClothConstraints` creates them (`ChaosClothConstraints.cpp`: edge springs, bending, area, long-range tethers, max distance, backstop, anim drive; read the exact order from the `Create*` calls) |
+| WaifuSim runs the **new** evolution | Skeletal-mesh clothing defaults to the legacy `FPBDEvolution` (`bClothUseLegacyEvolution = true`, `ChaosClothingSimulation.cpp:69`, cvar `p.ChaosCloth.UseLegacyEvolution`, passed to the solver at `:313`; `IsLegacySolver()` is `!!PBDEvolution`, `ChaosClothingSimulationSolver.h:65`). WaifuSim sets it to 0 in `Config/DefaultEngine.ini` (66ca92d): the evolution the Chaos Cloth Asset uses and Epic's cloth is moving to. `WaifuSim.Cloth.Spike.ItemCloth` checks the setting takes effect. The reference step is therefore `Softs::FEvolution::AdvanceOneTimeStepInternal` (`Chaos/Private/Chaos/SoftsEvolution.cpp:428`) |
+| The two evolutions cost and behave the same here | `Benchmarks.ModClothSolvers` (WaifuSim; a 1,472 and a 2,976 particle skirt on the swaying base character, with and without the body's physics asset, interleaved rounds): new/legacy simulate time with collision 0.96, 1.07 (small) and 0.85, 0.90 (large) over two runs; the same particles end inside the thighs under both. The item cloth test gives identical results under both (17.47 cm mean move, 12.78 cm drop, 9.931 cm/s mean speed) |
+| With defaults, one constraint pass per 60 Hz frame | Shared config: `IterationCount = 1`, `MaxIterationCount = 10`, `SubdivisionCount = 1`, `bUseXPBDConstraints = false` (`ChaosClothConfig.h:573-627`). The clothing solver steps each substep with `AdvanceOneTimeStep(SubstepDeltaTime, NumUsedSubsteps)` (`ChaosClothingSimulationSolver.cpp:2259`); the evolution takes `round(SolverFrequency * Dt * Multiplier * NumIterations)` iterations, clamped to [1, MaxNumIterations], with `SolverFrequency` 60 (`SoftsEvolution.cpp:12`, `:406-417`) |
+| New evolution step order | `SoftsEvolution.cpp:428-640`, per soft body: pre-substep parallel inits and local damping; the kinematic update; the initial guess (external force rules, `EulerStepVelocity`, `DampLocalVelocity`, `EulerStepPositionWithGlobalDamping` with the solver frequency); post-initial-guess inits (XPBD lambdas); pre-substep rules; each iteration: per-iteration PBD constraint rules, collision rules, post-collision rules; then `PostStepUpdate` (velocities from positions). The force-based (Newton) path is off: `bEnableForceBasedSolver = false` (`SoftsEvolution.cpp:16`, gate at `:451`). Constraint rules register in the order `FClothConstraints` creates them (`ChaosClothConstraints.cpp`: read the exact order from the `Create*` calls) |
 | Defaults the game uses (`UChaosClothConfig`, `ChaosClothConfig.h`) | Mass mode Density 0.35 (`:99`, `:120`), min particle mass 1e-4; edge, bending, area stiffness 1 (`:133`, `:142`, `:183`); tether stiffness 1, scale 1, geodesic tethers on (`:201-219`); collision thickness 1 cm, friction 0.8 (`:227-231`); damping 0.01 (`:289`); drag/lift 0.035 (`:318`, `:344`); gravity scale 1; anim drive {0, 1} weighted (`:390`); linear velocity scale 0.75, angular 0.75 (`:413`, `:446`) |
 | How the paint reaches Chaos | MaxDistance is a weighted property {0, 1} whose map holds centimetres (`ChaosClothingSimulationConfig.cpp:239-241`): the card's red × max distance. A particle is kinematic when its max distance is under 0.1 cm (`ChaosClothingSimulationCloth.cpp:290-300`). Green is the AnimDriveStiffness map, scaled by {0, 1}. Blue (ride) vertices are not particles: they are bound to the sim mesh by `ClothingMeshUtils::GenerateMeshToMeshVertData` |
 | Collision shapes Chaos cloth reads from a physics asset | Spheres, capsules (sphere pairs), tapered capsules (including extruded), boxes, convexes (`ChaosClothingSimulationCollider.cpp:595-690`). Tapered capsules are cloth-only in physics assets (Physics Asset Editor: "Clothing Only") |
-| Cost in the game | A 3542-particle dress simulated at ~0.42 ms a frame on the user's 14-core machine without collision (WaifuSim `WaifuSim.Cloth.Spike.RuntimeBuild`). Workshop's meter guides 1,000 simulated vertices a garment, 1,500 a character |
+| Cost in the game | On the base character with collision, Chaos's simulate time was 1.6-2.2 ms for 1,472 particles and 1.1-4.3 ms for 2,976 on the user's 14-core machine, the spread being thermal state between runs (`Benchmarks.ModClothSolvers`). The earlier 0.42 ms for 3,542 particles was a bare cloth component without a character or collision. Workshop's meter guides 1,000 simulated vertices a garment and 1,500 a character; Phase 6 revisits that |
 | The paint and card contract exists | Workshop `cloth.py`: colour attribute "WS Cloth", read as displayed (sRGB): R simulate (0 anchor .. 1 free to 40 cm), G shape-hold (anim drive 0..1), B ride (≥ 0.5). Card item `cloth`: `max_distance_cm`, `ride_threshold`, `simulated_vertices`, `overrides`, attribute names. Point attributes `_WS_CLOTH_SIM/HOLD/RIDE` in the item's .glb |
 
 ## Design decisions
 
 1. **A second solver, not a change to the first.** Waifu Physics keeps its charter per solver: chains are a faithful Kawaii port, cloth is a faithful Chaos Cloth port. New cloth features go in only where Chaos has them. The Kawaii step, its tests and its golden data are untouched.
-2. **Port the legacy PBD evolution with the shared config's defaults.** That is what the game runs today. If WaifuSim ever switches `p.ChaosCloth.UseLegacyEvolution` off, the port follows deliberately; until then `Softs::FEvolution` is out of scope.
+2. **Port the new evolution with the shared config's defaults.** WaifuSim runs `Softs::FEvolution` (it sets `p.ChaosCloth.UseLegacyEvolution=0`), and measured identical results against the legacy one on the cases tried, so the port follows the new step order. Out of scope with it: the force-based (Newton) path, quasistatics, buoyancy and per-particle damping arrays, none of which the default clothing config uses.
 3. **v1 scope:** particles with mass from density, gravity, damping (global and local), velocity scales for character motion, PBD edge springs, bending springs, area springs, long-range tethers (geodesic, from the kinematic set), max distance from red, anim drive from green, collisions with sphere, capsule, tapered capsule, box and plane colliders (thickness, friction), substeps and time-dependent iterations, teleport and reset. **Later:** wind and aerodynamics (drag, lift, outer drag), backstop, self-collision, XPBD and anisotropic variants, convex colliders. **Never:** Chaos LOD transitions, the Dataflow asset.
 4. **The step is a pure array function, twice, in agreement.** Constraints are graph-coloured once at build into batches that share no particle; numpy runs a batch as one vectorised update, C walks the same batches in the same order, so both are Gauss-Seidel by colour and agree to the bit (tested). Colouring changes the order relative to Chaos's sequential loop; that difference is accepted and measured against the golden data (decision 11).
 5. **One cloth system for the scene.** Every simulated mesh's particles live in one set of arrays, like the chain system; meshes are particle ranges with their own settings.
@@ -54,7 +55,7 @@ waifu_physics/
     build.py                 particles from a mesh: welding, kinematic set, masses, springs, bending pairs, area
                              triangles, geodesic tethers, ride bindings, constraint colouring
     system.py                the scene-wide cloth arrays and per-mesh ranges
-    step_numpy.py            the reference step (legacy PBD evolution order)
+    step_numpy.py            the reference step (Softs::FEvolution's order)
     step.c                   the C step -> bin/waifu_cloth_step.dll / .so (same release tooling)
     native.py                loads the DLL, checks its version, binds once, falls back to numpy
     display.py               the hidden Geometry Nodes group and modifier
@@ -73,13 +74,13 @@ tests/
 
 ### Phase 1: Spec capture
 
-- [ ] Read and record, with file and line, the legacy step: `FPBDEvolution::AdvanceOneTimeStep`, the pre-iteration update (damping, velocity scales), the constraint creation order in `FClothConstraints`, and each v1 constraint's apply (`PBDSpringConstraintsBase.h`, `PBDBendingConstraints*`, `PBDAxialSpringConstraints*` for area, `PBDLongRangeConstraintsBase.h`, `PBDSphericalConstraint.h`, `PBDAnimDriveConstraint.h`), mass from density, tether generation (`CalculateTethers`), and cloth collision against each shape. Append the findings to the table above.
+- [ ] Read and record, with file and line, the step: `Softs::FEvolution::AdvanceOneTimeStepInternal` and its helpers in `SoftsEvolution.cpp` (`EulerStepVelocity`, `DampLocalVelocity`, `EulerStepPositionWithGlobalDamping`, `PostStepUpdate`), the clothing solver's per-frame preparation (velocity scales, kinematic targets), the constraint creation order in `FClothConstraints`, and each v1 constraint's apply (`PBDSpringConstraintsBase.h`, `PBDBendingConstraints*`, `PBDAxialSpringConstraints*` for area, `PBDLongRangeConstraintsBase.h`, `PBDSphericalConstraint.h`, `PBDAnimDriveConstraint.h`), mass from density, tether generation (`CalculateTethers`), and cloth collision against each shape. Append the findings to the table above.
 - [ ] Build the WaifuSim golden fixture test (decision 11) and commit its JSON output here under `tests/golden/`.
 
 ### Phase 2: The numpy step
 
 - [ ] `cloth/build.py` and `cloth/system.py` from a mesh and its paint; colouring.
-- [ ] `cloth/step_numpy.py`: the v1 scope, legacy order.
+- [ ] `cloth/step_numpy.py`: the v1 scope, in the new evolution's order.
 - [ ] `test_cloth_golden.py` against the WaifuSim fixtures; record the tolerance.
 
 ### Phase 3: The C step
@@ -103,14 +104,14 @@ tests/
 
 - [ ] Apply the card's cloth settings to the runtime clothing config (`WaifuModCloth`).
 - [ ] The cloth-only collision physics asset from the card's body colliders (tapered capsules).
-- [ ] A collision benchmark on a mid-range target, to confirm or move Workshop's budget guide.
+- [ ] Revisit Workshop's budget guide from `Benchmarks.ModClothSolvers` (about 1.1-2.2 ms for 1,500 colliding particles on a 14-core desktop) and, if possible, a run on a mid-range machine.
 
 ---
 
 ## Risks
 
 - **Colouring is not Chaos's order.** Gauss-Seidel by colour converges like Chaos's sequential loop but not identically; with one iteration a frame the difference shows. Measure it first (Phase 2) and decide whether the C step should keep Chaos's sequential order with numpy matching through a slower path.
-- **The engine may change the default evolution.** A future WaifuSim engine upgrade could make the new evolution the default; the golden test catches it.
+- **The engine may change the evolution.** WaifuSim pins the new evolution in `DefaultEngine.ini`; an engine upgrade that changes `Softs::FEvolution` itself (or removes the setting) shows up in the golden test and in `WaifuSim.Cloth.Spike.ItemCloth`'s check.
 - **One iteration a frame is soft.** Chaos's defaults are stretchy; the preview must look that way too, or modders will tune against a stiffer Blender than the game.
 - **The display modifier evaluates twice.** Writing positions re-evaluates the mesh; keep the node group cheap and measure it with the existing benchmark method (interleaved A/B in one Blender process).
 - **Epic's licence.** Port behaviour and cite; do not paste engine code.
