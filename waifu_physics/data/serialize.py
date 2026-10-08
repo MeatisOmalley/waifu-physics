@@ -27,6 +27,27 @@ _NOT_SETTINGS = {"rna_type", "name", "curve_key", "active_link", "active_force",
                  "show_chains", "preset_name", "category"}
 
 
+def cloth_to_dict(obj):
+    from .cloth_props import VALUE_NAMES
+    return {"version": 1, "settings": {name: getattr(obj.waifu_cloth, name) for name in VALUE_NAMES},
+            "collider_sets": [entry.armature.name for entry in obj.waifu_cloth.collider_sets
+                              if entry.armature is not None]}
+
+
+def cloth_from_dict(obj, document):
+    from .cloth_props import VALUE_NAMES
+    if document.get("version", 1) != 1:
+        raise ValueError("Unsupported Waifu Cloth setup version")
+    for name, value in document.get("settings", {}).items():
+        if name in VALUE_NAMES:
+            setattr(obj.waifu_cloth, name, value)
+    obj.waifu_cloth.collider_sets.clear()
+    for name in document.get("collider_sets", ()):
+        armature = bpy.data.objects.get(name)
+        if armature is not None and armature.type == "ARMATURE":
+            obj.waifu_cloth.collider_sets.add().armature = armature
+
+
 def _plain(value):
     return list(value) if hasattr(value, "__len__") and not isinstance(value, str) else value
 

@@ -31,6 +31,7 @@ class Snapshot:
         self.forces = s.force_states()
         self.motions = [None if m.previous is None else tuple(v.copy() for v in m.previous) for m in rt.motions]
         self.channels = [{path: rig._buffers[path].copy() for path, _size in CHANNELS} for rig in rt.rigs]
+        self.cloth = rt.cloth.snapshot() if rt.cloth is not None else None
 
     def restore_state(self, rt):
         s = rt.system
@@ -41,12 +42,16 @@ class Snapshot:
         s.set_force_states(self.forces)
         for motion, previous in zip(rt.motions, self.motions):
             motion.previous = None if previous is None else tuple(v.copy() for v in previous)
+        if rt.cloth is not None:
+            rt.cloth.restore(self.cloth)
 
     def replay(self, rt):
         """Write the chain bones' channels as they were written for this frame. A bake's frames are laid out
         as it was made (rt.cache_rigs): each armature is found again by identity, and one whose bones changed
         since is left alone, since its rows would name other bones."""
         rt.own_update = True
+        if rt.cloth is not None:
+            rt.cloth.restore(self.cloth, write=True)
         layout = rt.cache_rigs if rt.cache_rigs is not None else [
             (rig.uid, None, np.flatnonzero(rig.chain)) for rig in rt.rigs]
         rigs = {rig.uid: rig for rig in rt.rigs}
@@ -75,6 +80,8 @@ class Snapshot:
         result = copy.copy(later)
         result.loc = earlier.loc + (later.loc - earlier.loc) * fraction      # drawn as the chains are shown
         result.channels = []
+        from . import cloth_live
+        result.cloth = cloth_live.between(earlier.cloth, later.cloth, fraction)
         for rig, a, b in zip(rt.rigs, earlier.channels, later.channels):
             rows = np.flatnonzero(rig.chain)
             channels = {path: values.copy() for path, values in a.items()}
@@ -139,6 +146,9 @@ def collider_prints(rt):
     from ..data import colliders
     scene = rt.scene()
     found = {}
+    if getattr(rt, "cloth", None) is not None and scene is not None:
+        # Include disabled shapes: enabling one also changes a cloth-only bake.
+        found.update({obj.session_uid: obj for obj in scene.objects if colliders.is_collider(obj)})
     for g in range(len(rt.group_props)):
         _rig, props = rt._group(g)
         for obj in colliders.group_colliders(props, scene, enabled_only=False) if scene is not None else ():
@@ -183,11 +193,21 @@ def relevant_update(rt, depsgraph):
     rig_data = {rig.data_uid for rig in rt.rigs}
     own = rt.own_update
     rt.own_update = False
+    if getattr(rt, "cloth", None) is not None and rt.cloth.changed(rt.scene()):
+        return True
+    if getattr(rt, "cloth", None) is not None:
+        printed = rt.cloth.static_inputs()
+        if printed != rt.cloth.input_prints:
+            rt.cloth.input_prints = printed
+            return True
     # A deleted (or unlinked) collider is not among the updates: it is gone. Its collections are, and our own
     # writes never touch collections, so a collection update is when colliders may have come or gone.
     colliders_touched = depsgraph.id_type_updated("COLLECTION")
+    cloth_inputs = rt.cloth.input_ids() if getattr(rt, "cloth", None) is not None else set()
     for update in depsgraph.updates:
         found = update.id
+        if not own and found.session_uid in cloth_inputs:
+            return True
         if isinstance(found, bpy.types.Action):
             # Waifu Physics mutes and unmutes the chains' curves itself (while simulating, around saves);
             # only a change to what the keys say counts.

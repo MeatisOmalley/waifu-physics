@@ -22,6 +22,9 @@ VCVARS = os.environ.get("WAIFU_PHYSICS_VCVARS", r"C:\Program Files (x86)\Microso
                                         r"\VC\Auxiliary\Build\vcvars64.bat")
 SOURCE = os.path.join(PACKAGE, "solver", "step.c")
 DLL = os.path.join(PACKAGE, "bin", "waifu_physics_step.dll")
+NATIVE_STEPS = ((SOURCE, DLL, "waifu_physics_step"),
+                (os.path.join(PACKAGE, "cloth", "step.c"),
+                 os.path.join(PACKAGE, "bin", "waifu_cloth_step.dll"), "waifu_cloth_step"))
 
 
 def build_dll():
@@ -34,46 +37,52 @@ def build_dll():
     os.makedirs(os.path.dirname(DLL), exist_ok=True)
     build_dir = os.path.join(REPO, "build")
     os.makedirs(build_dir, exist_ok=True)
-    # /fp:precise and no /arch: SSE2 arithmetic without FMA contraction, so floats round
-    # as Kawaii's C++ does and the C step agrees with step_numpy to the bit.
-    command = (f'"{VCVARS}" >nul && cl /nologo /O2 /fp:precise /LD "{SOURCE}" '
-               f'/Fo"{build_dir}\\\\" /Fe"{DLL}" /link /IMPLIB:"{build_dir}\\waifu_physics_step.lib"')
-    proc = subprocess.run(f'cmd /s /c "{command}"', shell=True, capture_output=True, text=True)
-    print(proc.stdout.strip())
-    if proc.returncode != 0 or not os.path.exists(DLL):
-        print(proc.stderr.strip())
-        print("compiling the C step failed")
-        return False
-    print("built", os.path.relpath(DLL, REPO))
+    # Separate object paths: both libraries intentionally name their source step.c.
+    # Precise floating arithmetic preserves the reference's operation order.
+    for source, dll, name in NATIVE_STEPS:
+        if not os.path.exists(source):
+            continue
+        command = (f'"{VCVARS}" >nul && cl /nologo /O2 /fp:precise /LD "{source}" '
+                   f'/Fo"{build_dir}\\{name}.obj" /Fe"{dll}" /link /IMPLIB:"{build_dir}\\{name}.lib"')
+        proc = subprocess.run(f'cmd /s /c "{command}"', shell=True, capture_output=True, text=True)
+        print(proc.stdout.strip())
+        if proc.returncode != 0 or not os.path.exists(dll):
+            print(proc.stderr.strip())
+            print("compiling", name, "failed")
+            return False
+        print("built", os.path.relpath(dll, REPO))
     return True
 
 
 def fetch_linux():
     """The Linux C step from the latest successful linux-step workflow run, if that run includes the
     committed step.c (and step.c has no uncommitted changes). Packaging goes on without it otherwise."""
-    so = os.path.join(PACKAGE, "bin", "waifu_physics_step.so")
+    libraries = [(source, os.path.join(PACKAGE, "bin", name+".so"), name)
+                 for source, _dll, name in NATIVE_STEPS]
 
     def run(*args):
         return subprocess.run(args, cwd=REPO, capture_output=True, text=True)
-    if os.path.exists(so):
-        os.remove(so)                                    # never package a stale one
-    if run("git", "diff", "--quiet", "HEAD", "--", SOURCE).returncode != 0:
-        print("step.c has uncommitted changes: no Linux C step (push them for the workflow to build)")
-        return
+    for _source, so, _name in libraries:
+        if os.path.exists(so):
+            os.remove(so)                                # never package a stale one
     found = run("gh", "run", "list", "--workflow", "linux-step.yml", "--status", "success", "--limit", "1",
                 "--json", "databaseId,headSha", "-q", r'.[0] | "\(.databaseId) \(.headSha)"')
     if found.returncode != 0 or not found.stdout.strip():
         print("no Linux C step: the GitHub CLI or a successful linux-step run is missing")
         return
     run_id, head = found.stdout.split()
-    changed = run("git", "log", "-1", "--format=%H", "--", SOURCE).stdout.strip()
-    if run("git", "merge-base", "--is-ancestor", changed, head).returncode != 0:
-        print("no Linux C step: the last successful linux-step run predates step.c (push, then wait for it)")
-        return
-    got = run("gh", "run", "download", run_id, "--name", "waifu_physics_step-linux-x64",
-              "--dir", os.path.join(PACKAGE, "bin"))
-    print("fetched the Linux C step" if got.returncode == 0 and os.path.exists(so)
-          else "fetching the Linux C step failed: " + got.stderr.strip())
+    for source, so, name in libraries:
+        if run("git", "diff", "--quiet", "HEAD", "--", source).returncode != 0:
+            print(name, "has uncommitted changes: no Linux library until the workflow builds it")
+            continue
+        changed = run("git", "log", "-1", "--format=%H", "--", source).stdout.strip()
+        if not changed or run("git", "merge-base", "--is-ancestor", changed, head).returncode != 0:
+            print("no Linux", name, ": the successful workflow predates its source")
+            continue
+        got = run("gh", "run", "download", run_id, "--name", name+"-linux-x64",
+                  "--dir", os.path.join(PACKAGE, "bin"))
+        print("fetched Linux "+name if got.returncode == 0 and os.path.exists(so)
+              else "fetching Linux "+name+" failed: " + got.stderr.strip())
 
 
 def blender(*args):

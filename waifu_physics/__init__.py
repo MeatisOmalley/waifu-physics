@@ -8,17 +8,20 @@ if "bpy" in locals():
         importlib.reload(_module)
 else:
     from .solver import uemath, system, curves as solver_curves, step_numpy, native, build
-    from .data import props, curves, colliders, links, serialize, presets, legacy
-    from .runtime import keys, io, cache, live
-    from .ui import selection, ops, manager, panels, draw
+    from .cloth import convention, display, build as cloth_build, system as cloth_system, step_numpy as cloth_numpy, native as cloth_native
+    from .data import props, cloth_props, curves, colliders, links, serialize, presets, legacy
+    from .runtime import keys, io, cache, cloth_live, live
+    from .ui import selection, ops, manager, panels, cloth_panel, draw
 
 import bpy  # noqa: E402,F401  (its presence marks a reload, above)
 
-_RELOAD_ORDER = (uemath, system, solver_curves, step_numpy, native, build, props, curves, colliders, links, serialize,
-                 presets, legacy, keys, io, cache, live, selection, ops, manager, panels, draw)
+_RELOAD_ORDER = (uemath, system, solver_curves, step_numpy, native, build,
+                 convention, display, cloth_build, cloth_numpy, cloth_native, cloth_system, props, cloth_props,
+                 curves, colliders, links, serialize, presets, legacy, keys, io, cache, cloth_live, live,
+                 selection, ops, manager, panels, cloth_panel, draw)
 
 # Registered in this order, unregistered in reverse.
-MODULES = (props, legacy, live, selection, ops, manager, panels, draw)   # legacy first: it migrates old files
+MODULES = (props, cloth_props, legacy, live, selection, ops, manager, panels, cloth_panel, draw)
 
 
 def register():

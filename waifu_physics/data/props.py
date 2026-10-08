@@ -531,7 +531,7 @@ class WaifuPhysicsArmature(PropertyGroup):
 
 class WaifuPhysicsScene(PropertyGroup):
     simulate: BoolProperty(name="Simulate", default=False, update=lambda self, context: _simulate_changed(self),
-                           description="Simulate the chains while the timeline plays")
+                           description="Simulate chains and cloth while the timeline plays")
     # The running simulation's clock follows these on its next frame, without a rebuild (Runtime.sync_clock).
     target_framerate: IntProperty(name="Steps per Second", default=60, min=1, max=480,
                                   description="Simulation steps per second. Changes how the settings feel")

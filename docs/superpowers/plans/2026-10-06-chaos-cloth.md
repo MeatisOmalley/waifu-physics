@@ -1,6 +1,6 @@
 # Waifu Cloth Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. Each phase is expanded into step-level tasks when it starts; this document fixes the design and the order.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking. Each phase is expanded into step-level tasks when it starts; this document fixes the design and the order.
 
 **Goal:** Preview in Blender, live, what a garment's cloth will do in a game running Chaos Cloth: a second solver in Waifu Physics, a faithful port of the Chaos Cloth simulation the game runs, driven by the same per-vertex paint the game reads, colliding with the same colliders.
 
@@ -34,7 +34,7 @@ Recorded 2026-10-06 (WaifuSim branch history, `docs/superpowers/plans/2026-09-20
 1. **A second solver, not a change to the first.** Waifu Physics keeps its charter per solver: chains are a faithful Kawaii port, cloth is a faithful Chaos Cloth port. New cloth features go in only where Chaos has them. The Kawaii step, its tests and its golden data are untouched.
 2. **Port the new evolution with the shared config's defaults.** WaifuSim runs `Softs::FEvolution` (it sets `p.ChaosCloth.UseLegacyEvolution=0`), and measured identical results against the legacy one on the cases tried, so the port follows the new step order. Out of scope with it: the force-based (Newton) path, quasistatics, buoyancy and per-particle damping arrays, none of which the default clothing config uses.
 3. **v1 scope:** particles with mass from density, gravity, damping (global and local), velocity scales for character motion, PBD edge springs, bending springs, area springs, long-range tethers (geodesic, from the kinematic set), max distance from red, anim drive from green, collisions with sphere, capsule, tapered capsule, box and plane colliders (thickness, friction), substeps and time-dependent iterations, teleport and reset. **Later:** wind and aerodynamics (drag, lift, outer drag), backstop, self-collision, XPBD and anisotropic variants, convex colliders. **Never:** Chaos LOD transitions, the Dataflow asset.
-4. **The step is a pure array function, twice, in agreement.** Constraints are graph-coloured once at build into batches that share no particle; numpy runs a batch as one vectorised update, C walks the same batches in the same order, so both are Gauss-Seidel by colour and agree to the bit (tested). Colouring changes the order relative to Chaos's sequential loop; that difference is accepted and measured against the golden data (decision 11).
+4. **The step is a pure array function, twice, in agreement.** Constraints are graph-coloured once at build into batches that share no dynamic particle; numpy runs a batch as one vectorised update, C walks the same batches in the same order. Unreal Development also colours small meshes; its threshold selects parallel execution, not colouring. Shipping/Test can retain sequential ordering below the threshold. C/numpy position and velocity differences measured zero over the 120-frame supported-feature fixture; this is not a universal cross-platform identity guarantee.
 5. **One cloth system for the scene.** Every simulated mesh's particles live in one set of arrays, like the chain system; meshes are particle ranges with their own settings.
 6. **The paint is Waifu Physics' convention.** A colour attribute **"Waifu Cloth"** on the mesh: R simulate, G hold, B ride, read as displayed. It moves here from Workshop (which named it "WS Cloth"); Workshop renames old attributes when it meets them. Defining the channels once, in the library, is what keeps the preview, the card and the game in step.
 7. **The opt-in is a cloth setup on the object.** A mesh simulates when it has an enabled cloth setup (its settings: max distance, stiffnesses, density, damping, collision thickness and friction, iterations, which collider sets it uses), stored the way Blender 5 stores add-on data (system properties, migrated on rename). Workshop's per-row checkbox mirrors into the instance's setup on Instantiate and on toggle, so rebuilds keep it.
@@ -74,31 +74,38 @@ tests/
 
 ### Phase 1: Spec capture
 
-- [ ] Read and record, with file and line, the step: `Softs::FEvolution::AdvanceOneTimeStepInternal` and its helpers in `SoftsEvolution.cpp` (`EulerStepVelocity`, `DampLocalVelocity`, `EulerStepPositionWithGlobalDamping`, `PostStepUpdate`), the clothing solver's per-frame preparation (velocity scales, kinematic targets), the constraint creation order in `FClothConstraints`, and each v1 constraint's apply (`PBDSpringConstraintsBase.h`, `PBDBendingConstraints*`, `PBDAxialSpringConstraints*` for area, `PBDLongRangeConstraintsBase.h`, `PBDSphericalConstraint.h`, `PBDAnimDriveConstraint.h`), mass from density, tether generation (`CalculateTethers`), and cloth collision against each shape. Append the findings to the table above.
-- [ ] Build the WaifuSim golden fixture test (decision 11) and commit its JSON output here under `tests/golden/`.
+Implementation progress (2026-10-08): Phases 1–5 implemented and under final review. The detailed source capture is
+in [cloth-reference.md](../../cloth-reference.md). Four independent Unreal 5.8 modern-evolution captures (static
+and swaying skirt/flag, 61 frames at 60 Hz) pass bounds of **0.5 cm RMS / 2 cm maximum**. Measured worst error is
+**0.3173 cm RMS / 1.1669 cm maximum**, on the static flag. C/numpy agreement is a separate check. Unreal collision,
+green-map and rotating-reference captures remain validation gaps. Phase 6 remains separate game integration;
+exported tuning other than max distance is not yet applied by the game loader.
+
+- [x] Read and record, with file and line, the step: `Softs::FEvolution::AdvanceOneTimeStepInternal` and its helpers in `SoftsEvolution.cpp` (`EulerStepVelocity`, `DampLocalVelocity`, `EulerStepPositionWithGlobalDamping`, `PostStepUpdate`), the clothing solver's per-frame preparation (velocity scales, kinematic targets), the constraint creation order in `FClothConstraints`, and each v1 constraint's apply (`PBDSpringConstraintsBase.h`, `PBDBendingConstraints*`, `PBDAxialSpringConstraints*` for area, `PBDLongRangeConstraintsBase.h`, `PBDSphericalConstraint.h`, `PBDAnimDriveConstraint.h`), mass from density, tether generation (`CalculateTethers`), and cloth collision against each shape. Append the findings to the table above.
+- [x] Build the WaifuSim golden fixture test (decision 11) and commit its JSON output here under `tests/golden/`.
 
 ### Phase 2: The numpy step
 
-- [ ] `cloth/build.py` and `cloth/system.py` from a mesh and its paint; colouring.
-- [ ] `cloth/step_numpy.py`: the v1 scope, in the new evolution's order.
-- [ ] `test_cloth_golden.py` against the WaifuSim fixtures; record the tolerance.
+- [x] `cloth/build.py` and `cloth/system.py` from a mesh and its paint; colouring.
+- [x] `cloth/step_numpy.py`: the v1 scope, in the new evolution's order.
+- [x] `test_cloth_golden.py` against the WaifuSim fixtures; record the tolerance.
 
 ### Phase 3: The C step
 
-- [ ] `cloth/step.c` in lockstep; `native.py`; release tooling builds both DLLs and fetches both .so files.
-- [ ] `test_cloth_agreement.py`: random fixtures, every feature, C equals numpy to the bit.
-- [ ] `bench_cloth.py`: record numpy and C costs.
+- [x] `cloth/step.c` in lockstep; `native.py`; release tooling builds both DLLs and fetches both .so files.
+- [x] `test_cloth_agreement.py`: random fixtures, every feature, C equals numpy to the bit.
+- [x] `bench_cloth.py`: record numpy and C costs.
 
 ### Phase 4: Blender runtime
 
-- [ ] `display.py` modifier; `cloth_live.py` read, step, write; join live playback, the cache, Cache All, teleport and reset; undo-safe references.
-- [ ] `cloth_props.py`, the Cloth subpanel, serialize; `test_cloth_runtime.py`.
+- [x] `display.py` modifier; `cloth_live.py` read, step, write; join live playback, the cache, Cache All, teleport and reset; undo-safe references.
+- [x] `cloth_props.py`, the Cloth subpanel, serialize; `test_cloth_runtime.py`.
 
 ### Phase 5: Waifu Workshop
 
-- [ ] Bump the submodule; `cloth.py` keeps only the Workshop parts (budget guide, overridden groups, card export) and calls Waifu Physics for the convention; rename "WS Cloth" to "Waifu Cloth" where met.
-- [ ] The Cloth panel's checkbox mirrors into the instance's cloth setup; a Preview toggle plays it with the body colliders; per-garment settings in the panel.
-- [ ] Export the setup into the card's `cloth` entry; `tools/verify_cloth_export.py` checks it.
+- [x] Bump the submodule; `cloth.py` keeps only the Workshop parts (budget guide, overridden groups, card export) and calls Waifu Physics for the convention; rename "WS Cloth" to "Waifu Cloth" where met.
+- [x] The Cloth panel's checkbox mirrors into the instance's cloth setup; a Preview toggle plays it with the body colliders; per-garment settings in the panel.
+- [x] Export the setup into the card's `cloth` entry; `tools/verify_cloth_export.py` checks it.
 
 ### Phase 6: WaifuSim
 
@@ -110,7 +117,7 @@ tests/
 
 ## Risks
 
-- **Colouring is not Chaos's order.** Gauss-Seidel by colour converges like Chaos's sequential loop but not identically; with one iteration a frame the difference shows. Measure it first (Phase 2) and decide whether the C step should keep Chaos's sequential order with numpy matching through a slower path.
+- **Ordering and float arithmetic can drift.** Unreal Development also colours constraints; Shipping/Test can skip small-mesh colouring. SIMD rounding and geodesic ties can still diverge. Keep the measured trajectory tolerance and native/reference checks separate.
 - **The engine may change the evolution.** WaifuSim pins the new evolution in `DefaultEngine.ini`; an engine upgrade that changes `Softs::FEvolution` itself (or removes the setting) shows up in the golden test and in `WaifuSim.Cloth.Spike.ItemCloth`'s check.
 - **One iteration a frame is soft.** Chaos's defaults are stretchy; the preview must look that way too, or modders will tune against a stiffer Blender than the game.
 - **The display modifier evaluates twice.** Writing positions re-evaluates the mesh; keep the node group cheap and measure it with the existing benchmark method (interleaved A/B in one Blender process).

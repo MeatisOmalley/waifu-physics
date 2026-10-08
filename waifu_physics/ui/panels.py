@@ -55,6 +55,7 @@ class WAIFU_PHYSICS_PT_main(bpy.types.Panel):
         # With no group in the scene there is nothing to simulate: greyed, but a simulation or cache left on
         # (say, every group deleted) can still be switched off.
         grouped = any(obj.type == "ARMATURE" and len(obj.waifu_physics.groups) for obj in scene.objects)
+        grouped = grouped or any(obj.type == "MESH" and obj.waifu_cloth.enabled for obj in scene.objects)
         row = layout.row(align=True)
         row.scale_y = 1.3
         row.enabled = grouped or settings.simulate

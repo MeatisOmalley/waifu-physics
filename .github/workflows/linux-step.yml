@@ -4,7 +4,7 @@
 name: Linux C step
 on:
   push:
-    paths: ["waifu_physics/solver/**", "tests/test_solver_agreement.py", ".github/workflows/linux-step.yml"]
+    paths: ["waifu_physics/solver/**", "waifu_physics/cloth/**", "tests/test_solver_agreement.py", "tests/test_cloth*.py", ".github/workflows/linux-step.yml"]
   workflow_dispatch:
 jobs:
   build:
@@ -20,6 +20,8 @@ jobs:
           mkdir -p waifu_physics/bin
           gcc -O2 -fPIC -shared -ffp-contract=off -fno-fast-math -o waifu_physics/bin/waifu_physics_step.so \
               waifu_physics/solver/step.c -lm
+          gcc -O2 -fPIC -shared -ffp-contract=off -fno-fast-math -o waifu_physics/bin/waifu_cloth_step.so \
+              waifu_physics/cloth/step.c -lm
       - name: Agree with step_numpy
         # The package imports Blender; the solver does not. A stand-in package holds just the solver.
         run: |
@@ -27,6 +29,7 @@ jobs:
           mkdir -p ci/waifu_physics
           touch ci/waifu_physics/__init__.py
           ln -s "$PWD/waifu_physics/solver" ci/waifu_physics/solver
+          ln -s "$PWD/waifu_physics/cloth" ci/waifu_physics/cloth
           ln -s "$PWD/waifu_physics/bin" ci/waifu_physics/bin
           # Run outside the repo, and with the repo last on the path, so the stand-in is what imports.
           ROOT="$PWD"
@@ -34,7 +37,13 @@ jobs:
           # glibc and numpy may round sin, pow and acos's last bit differently: the steps must first part at
           # rounding level (1e-12 cm); how far chaos carries it after is reported.
           WAIFU_PHYSICS_AGREEMENT_TOLERANCE=1e-12 PYTHONPATH="$ROOT/ci:$ROOT" $PY tests/test_solver_agreement.py
+          PYTHONPATH="$ROOT/ci:$ROOT" $PY tests/test_cloth_build.py
+          PYTHONPATH="$ROOT/ci:$ROOT" $PY tests/test_cloth_agreement.py
       - uses: actions/upload-artifact@v4
         with:
           name: waifu_physics_step-linux-x64
           path: waifu_physics/bin/waifu_physics_step.so
+      - uses: actions/upload-artifact@v4
+        with:
+          name: waifu_cloth_step-linux-x64
+          path: waifu_physics/bin/waifu_cloth_step.so

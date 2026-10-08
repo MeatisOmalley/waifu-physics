@@ -26,6 +26,7 @@ from ..solver.system import Group, COMPLIANCE_TYPES, PLANAR_NONE, PLANAR_X, PLAN
 from . import cache as frame_cache
 from . import io
 from . import keys as chain_keys
+from . import cloth_live
 
 F32 = np.float32
 PLANAR = {"NONE": PLANAR_NONE, "X": PLANAR_X, "Y": PLANAR_Y, "Z": PLANAR_Z}
@@ -87,10 +88,11 @@ def mark_dirty(scene=None):
         _dirty.add(scene.as_pointer())
 
 
-def armatures(scene):
+def armatures(scene, suppressed=()):
     """Armature objects in the scene with at least one enabled group."""
     return [obj for obj in scene.objects if obj.type == "ARMATURE"
-            and any(group.enabled and len(group.roots) for group in obj.waifu_physics.groups)]
+            and any(group.enabled and len(group.roots) and (obj.session_uid, group.name) not in suppressed
+                    for group in obj.waifu_physics.groups)]
 
 
 class Runtime:
@@ -101,12 +103,14 @@ class Runtime:
         outside frame changes, where frame_change_pre has not cleared them."""
         self.scene_pointer = scene.as_pointer()
         self.cm = io.cm_per_unit(scene)
-        self.rigs = [io.Rig(obj) for obj in armatures(scene)]
+        self.suppressed = cloth_live.overrides(scene)
+        self.rigs = [io.Rig(obj) for obj in armatures(scene, self.suppressed)]
         self.group_props = []          # (rig index, group index in obj.waifu_physics.groups)
         names, parents, ref_length, pose, rotation, tip_length = [], [], [], [], [], []
         offsets = []
         for rig in self.rigs:
-            groups = [props for props in rig.obj.waifu_physics.groups if props.enabled and len(props.roots)]
+            groups = [props for props in rig.obj.waifu_physics.groups if props.enabled and len(props.roots)
+                      and (rig.uid, props.name) not in self.suppressed]
             # Each group's chains cut off at its own excluded bones: a group can start where another ends.
             rig.set_chain(sorted({bone for props in groups for bone in rig.subtree(
                 [root.name for root in props.roots], [bone.name for bone in props.excluded])}))
@@ -127,7 +131,7 @@ class Runtime:
         specs = []
         for r, rig in enumerate(self.rigs):
             for g, props in enumerate(rig.obj.waifu_physics.groups):
-                if not props.enabled or not len(props.roots):
+                if not props.enabled or not len(props.roots) or (rig.uid, props.name) in self.suppressed:
                     continue
                 self.group_props.append((r, g))
                 specs.append(self._spec(r, props))
@@ -182,6 +186,9 @@ class Runtime:
         self.outdated = None              # why a bake no longer matches the scene, or None
         self.own_update = False           # the next depsgraph update is our own write
         self.collider_prints = {}
+        self.cloth = cloth_live.ClothRuntime(scene) if cloth_live.objects(scene) else None
+        if self.cloth is not None:
+            self.fast = False                     # cloth's skin is an evaluated, same-frame input
 
     def _exact_ahead(self, scene):
         """Can the one-evaluation path read this frame's whole input before Blender evaluates it? Every bone the
@@ -507,6 +514,9 @@ class Runtime:
             self._warm_up(warm)
         self._write()
 
+        if self.cloth is not None:
+            self.cloth.reset(scene)
+
     def _warm_up(self, warm):
         """WarmUp (Simulation.cpp:1364): steps of the fixed step before the first frame, per group."""
         s = self.system
@@ -541,6 +551,9 @@ class Runtime:
             self.motions[g].consume(s.consume_fraction, np.array(location) * self.cm,
                                     (rotation.x, rotation.y, rotation.z, rotation.w), tuple(scale))
         self._write()
+
+        if self.cloth is not None:
+            self.cloth.step(scene, seconds)
 
     def step(self, scene, frames, ahead=False):
         """ahead: solve in frame_change_pre, before Blender evaluates the frame, so it evaluates the
@@ -584,7 +597,7 @@ class Runtime:
 
     def alive(self):
         """Every armature it was built for is still there, with the same bones."""
-        return all(rig.alive() for rig in self.rigs)
+        return all(rig.alive() for rig in self.rigs) and (self.cloth is None or self.cloth.alive())
 
     def restore(self, frame=None):
         for rig in self.rigs:
@@ -595,6 +608,8 @@ class Runtime:
         """Stop simulating: the chains' keys back to Blender, the chains back to their input. An armature whose
         bones changed only gets its keys back (by its record: chain_keys.release_marked); a deleted one is
         skipped, its keys gone with it."""
+        if getattr(self, "cloth", None) is not None:
+            self.cloth.release()
         for rig in self.rigs:
             if not rig.alive():
                 try:
@@ -622,6 +637,8 @@ class Runtime:
     def show_unsimulated(self, frame=None):
         """A frame the cache has not reached: the chains at their input, as cloth shows them."""
         self.own_update = True
+        if self.cloth is not None:
+            self.cloth.release()
         for rig in self.rigs:
             rig.read()
             rig.restore(frame)
@@ -639,6 +656,11 @@ class Runtime:
         """Has an armature's action changed shape since this run was built (keys.HeldCurves.stale)? Checked each
         frame, since edits made through the API need not reach the depsgraph handler first."""
         try:
+            if self.cloth is not None:
+                if self.cloth.changed(self.scene()):
+                    return True
+            elif cloth_live.objects(self.scene()):
+                return True
             return any(rig.keys is not None and rig.keys.curves.stale() for rig in self.rigs)
         except ReferenceError:
             return True
@@ -682,7 +704,7 @@ def _essentials(scene, rt):
     type (the solver reads them all, and a disabled field is not visible, so it would be skipped), with
     what they are parented to and their constraint and driver targets, followed through."""
     needed = set()
-    stack = [rig.obj for rig in rt.rigs] + [
+    stack = [rig.obj for rig in rt.rigs] + (rt.cloth.meshes if rt.cloth is not None else []) + [
         obj for obj in scene.objects
         if obj.waifu_physics_collider.is_collider or (obj.field is not None and obj.field.type != "NONE")]
     while stack:
@@ -691,6 +713,7 @@ def _essentials(scene, rt):
             continue
         needed.add(obj.name)
         stack.append(obj.parent)
+        stack += [modifier.object for modifier in obj.modifiers if getattr(modifier, "object", None) is not None]
         owners = [obj] + (list(obj.pose.bones) if obj.pose is not None else [])
         for owner in owners:
             for constraint in owner.constraints:
@@ -882,6 +905,7 @@ def set_simulating(scene, on):
             current.release()
         # Simulate off leaves no curve muted by Waifu Physics, whatever a lost run (an undo) left behind.
         chain_keys.recover(scene.objects)
+        _clear_cloth_display(scene.objects)
 
 
 def _frame_changing_body(scene, depsgraph=None):
@@ -989,7 +1013,7 @@ def _armature_changes(scene, depsgraph):
                                                # its rest position or length (a chain's tip is at its last tail)
     elif depsgraph.id_type_updated("COLLECTION") or depsgraph.id_type_updated("SCENE") \
             or depsgraph.id_type_updated("OBJECT"):
-        if [obj.session_uid for obj in armatures(scene)] != [rig.uid for rig in current.rigs]:
+        if [obj.session_uid for obj in armatures(scene, current.suppressed)] != [rig.uid for rig in current.rigs]:
             mark_dirty(scene)                  # an armature with groups added, deleted or unlinked
 
 
@@ -1062,6 +1086,7 @@ def _undone(scene, *_args):
     (chain_keys.release_marked, when the new run reads its keys)."""
     _runtimes.clear()
     _dirty.add("all")
+    _clear_cloth_display()
 
 
 @persistent
@@ -1075,9 +1100,18 @@ def _file_ready(_file):
     """Curves a previous session left muted (it ended while simulating) are unmuted; bones renamed while the
     add-on was off are followed."""
     chain_keys.recover(bpy.data.objects)
+    _clear_cloth_display()
     for obj in bpy.data.objects:
         if obj.library is None and obj.type == "ARMATURE" and len(obj.waifu_physics.groups):
             bone_refs.repair(obj)
+
+
+def _clear_cloth_display(objects=None):
+    """Restored mesh attributes are saved output, not a surviving solver state."""
+    from ..cloth import display
+    for obj in bpy.data.objects if objects is None else objects:
+        if obj.library is None and obj.type == "MESH":
+            display.clear(obj)
 
 
 @persistent

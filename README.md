@@ -29,6 +29,23 @@ While simulating, Waifu Physics takes over the chain bones' keyframes: it mutes 
 
 **Sharing.** **Copy Settings** and **Paste Settings** move a group's settings and curves between groups. Export Setup and Import Setup (in F3 search) save an armature's groups, links, curves and colliders to JSON and load them back. A setup moved onto another armature with the same bone names behaves identically.
 
+## Cloth preview
+
+Select a mesh and open **Cloth**. Enable **Simulate**, paint its **Waifu Cloth** attribute, then enable the scene's
+**Simulate** and play the timeline. Red sets max distance from the animated skin, black anchors, green holds the
+animated shape, and blue carries details on the nearest cloth triangle. Existing **WS Cloth** paint migrates on use.
+The last Geometry Nodes modifier displays cloth without changing source vertices. Cloth joins the existing cache.
+Cloth meshes must have single-user Object Data; linked duplicates are rejected so their preview states cannot mix.
+
+The separate C/numpy solver follows Unreal 5.8's modern Chaos evolution: density, gravity, global/local damping,
+character motion, edge/bending/area springs, geodesic tethers, max distance, animation drive and primitive collisions.
+Wind, backstop, self-collision, XPBD, anisotropy and convex collision are deferred. All cloth meshes share the highest
+requested substep count. [Reference and measurements](docs/cloth-reference.md) record the scope and parity limits.
+Four Unreal skirt/flag captures currently pass bounds of 0.5 cm RMS and 2 cm maximum over one second; collision,
+green paint and rotating-character behavior have analytical tests, but no Unreal captures yet. This is an approximate
+preview, not a claim of identical trajectories. Native default stepping measured 0.44 ms for 1,520 particles,
+excluding Blender evaluation and display.
+
 ## Parity with Kawaii Physics
 
 The rule: the simulation step does exactly what Kawaii Physics does, at the pinned commit, and anything Blender-specific lives outside it. The step reproduces Kawaii's own golden test bit for bit, in C (Windows) and in numpy (everywhere else), and the two backends agree bit for bit.
